@@ -21,9 +21,7 @@ import androidx.compose.ui.unit.dp
 import com.hermes.deck.data.AppInfo
 import com.hermes.deck.data.ScreenshotCache
 
-private val CARD_WIDTH  = 156.dp
-private val CARD_HEIGHT = 232.dp
-private val CARD_CORNER = 18.dp
+val CARD_CORNER = 24.dp
 
 @Composable
 fun AppCard(
@@ -34,7 +32,6 @@ fun AppCard(
     val screenshot: Bitmap? = remember(app.packageName) {
         ScreenshotCache.get(app.packageName)
     }
-    // Convert the app's Drawable icon to a Bitmap for use as a fallback
     val iconBitmap: Bitmap = remember(app.packageName) {
         val d = app.icon
         val w = d.intrinsicWidth.coerceIn(1, 192)
@@ -45,45 +42,48 @@ fun AppCard(
         }
     }
 
-    Column(
+    Box(
         modifier = modifier
-            .width(CARD_WIDTH)
-            .clickable(onClick = onTap),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .fillMaxSize()
+            .clip(RoundedCornerShape(CARD_CORNER))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .clickable(onClick = onTap)
     ) {
-        Box(
-            modifier = Modifier
-                .width(CARD_WIDTH)
-                .height(CARD_HEIGHT)
-                .clip(RoundedCornerShape(CARD_CORNER))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center
-        ) {
-            if (screenshot != null) {
-                Image(
-                    bitmap             = screenshot.asImageBitmap(),
-                    contentDescription = app.label,
-                    contentScale       = ContentScale.Crop,
-                    modifier           = Modifier.fillMaxSize()
-                )
-            } else {
-                Image(
-                    bitmap             = iconBitmap.asImageBitmap(),
-                    contentDescription = app.label,
-                    modifier           = Modifier.size(72.dp)
-                )
-            }
+        if (screenshot != null) {
+            Image(
+                bitmap             = screenshot.asImageBitmap(),
+                contentDescription = app.label,
+                contentScale       = ContentScale.Crop,
+                modifier           = Modifier.fillMaxSize()
+            )
+        } else {
+            Image(
+                bitmap             = iconBitmap.asImageBitmap(),
+                contentDescription = app.label,
+                modifier           = Modifier
+                    .size(80.dp)
+                    .align(Alignment.Center)
+            )
         }
 
-        Spacer(Modifier.height(6.dp))
-
-        Text(
-            text     = app.label,
-            style    = MaterialTheme.typography.labelMedium,
-            color    = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(bottom = 4.dp)
-        )
+        // App label pinned to bottom
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+                .background(
+                    MaterialTheme.colorScheme.surface.copy(alpha = 0.55f),
+                    RoundedCornerShape(bottomStart = CARD_CORNER, bottomEnd = CARD_CORNER)
+                )
+                .padding(horizontal = 16.dp, vertical = 10.dp)
+        ) {
+            Text(
+                text     = app.label,
+                style    = MaterialTheme.typography.labelLarge,
+                color    = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
     }
 }

@@ -18,42 +18,46 @@ import com.hermes.deck.ui.search.LauncherSearchBar
 
 @Composable
 fun HomeScreen(modifier: Modifier = Modifier) {
-    val context    = LocalContext.current
+    val context = LocalContext.current
     val vm: HomeViewModel = viewModel(factory = HomeViewModel.factory(context))
-    val state      by vm.uiState.collectAsState()
+    val state by vm.uiState.collectAsState()
     var drawerOpen by remember { mutableStateOf(false) }
 
-    // Refresh recent apps every time we come back to the home screen
     LaunchedEffect(Unit) { vm.refresh() }
 
     Box(modifier = modifier) {
         WallpaperBackground()
 
-        // Card strip — the webOS multitasking view
-        CardStrip(
-            cards       = state.recentApps,
-            modifier    = Modifier
+        Column(
+            modifier = Modifier
                 .fillMaxSize()
-                .systemBarsPadding()
-                .padding(bottom = 120.dp), // leave room for search bar
-            onCardTap   = { app ->
-                context.packageManager.getLaunchIntentForPackage(app.packageName)
-                    ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    ?.let { context.startActivity(it) }
-            },
-            onCardDismiss = vm::dismissCard
-        )
+                .statusBarsPadding()
+        ) {
+            // Card strip fills all space above the search bar
+            CardStrip(
+                cards         = state.recentApps,
+                modifier      = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .padding(top = 8.dp),
+                onCardTap     = { app ->
+                    context.packageManager.getLaunchIntentForPackage(app.packageName)
+                        ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        ?.let { context.startActivity(it) }
+                },
+                onCardDismiss = vm::dismissCard
+            )
 
-        // Search bar pinned to the bottom
-        LauncherSearchBar(
-            onOpenDrawer = { drawerOpen = true },
-            modifier     = Modifier
-                .align(Alignment.BottomCenter)
-                .navigationBarsPadding()
-                .padding(bottom = 12.dp)
-        )
+            // Search bar pinned to bottom
+            LauncherSearchBar(
+                onOpenDrawer = { drawerOpen = true },
+                modifier     = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+            )
+        }
 
-        // Nudge the user to grant Usage Access if not yet granted
         if (!state.hasUsagePermission) {
             UsagePermissionNudge(
                 modifier = Modifier.align(Alignment.Center),
@@ -66,14 +70,13 @@ fun HomeScreen(modifier: Modifier = Modifier) {
             )
         }
 
-        // Full-screen app drawer, slides up from bottom
         AnimatedVisibility(
             visible = drawerOpen,
             enter   = slideInVertically(initialOffsetY = { it }),
             exit    = slideOutVertically(targetOffsetY = { it })
         ) {
             AppDrawer(
-                onClose    = { drawerOpen = false },
+                onClose     = { drawerOpen = false },
                 onAppLaunch = { app ->
                     drawerOpen = false
                     context.packageManager.getLaunchIntentForPackage(app.packageName)
