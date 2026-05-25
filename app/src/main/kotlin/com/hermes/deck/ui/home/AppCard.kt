@@ -2,34 +2,38 @@ package com.hermes.deck.ui.home
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hermes.deck.data.AppInfo
 import com.hermes.deck.data.ScreenshotCache
 
-val CARD_CORNER = 24.dp
+val CARD_CORNER = 40.dp
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun AppCard(
     app: AppInfo,
     onTap: () -> Unit,
+    onLongPress: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val screenshot: Bitmap? = remember(app.packageName) {
+    val cacheRevision by ScreenshotCache.revision.collectAsState()
+    val screenshot: Bitmap? = remember(app.packageName, cacheRevision) {
         ScreenshotCache.get(app.packageName)
     }
     val iconBitmap: Bitmap = remember(app.packageName) {
@@ -41,13 +45,13 @@ fun AppCard(
             d.draw(Canvas(bmp))
         }
     }
-
     Box(
-        modifier = modifier
+        modifier         = modifier
             .fillMaxSize()
             .clip(RoundedCornerShape(CARD_CORNER))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable(onClick = onTap)
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .combinedClickable(onClick = onTap, onLongClick = onLongPress),
+        contentAlignment = Alignment.Center
     ) {
         if (screenshot != null) {
             Image(
@@ -60,29 +64,7 @@ fun AppCard(
             Image(
                 bitmap             = iconBitmap.asImageBitmap(),
                 contentDescription = app.label,
-                modifier           = Modifier
-                    .size(80.dp)
-                    .align(Alignment.Center)
-            )
-        }
-
-        // App label pinned to bottom
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .align(Alignment.BottomCenter)
-                .background(
-                    MaterialTheme.colorScheme.surface.copy(alpha = 0.55f),
-                    RoundedCornerShape(bottomStart = CARD_CORNER, bottomEnd = CARD_CORNER)
-                )
-                .padding(horizontal = 16.dp, vertical = 10.dp)
-        ) {
-            Text(
-                text     = app.label,
-                style    = MaterialTheme.typography.labelLarge,
-                color    = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+                modifier           = Modifier.size(80.dp)
             )
         }
     }

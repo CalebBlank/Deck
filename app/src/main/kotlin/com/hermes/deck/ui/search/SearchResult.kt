@@ -25,4 +25,24 @@ sealed class SearchResult {
         val iconUri: String?,
         val actionUri: String?
     ) : SearchResult()
+
+    data class AiResult(
+        val query: String,
+        val answer: String
+    ) : SearchResult()
+
+    data class WidgetPickerResult(
+        val appPackage: String,
+        val appLabel: String,
+        val providers: List<WidgetProviderInfo>,
+        val pinnedComponentName: String?
+    ) : SearchResult()
 }
+
+data class WidgetProviderInfo(
+    val componentName: String,
+    val label: String,
+    val packageName: String,
+    val previewResId: Int,
+    val iconResId: Int
+)

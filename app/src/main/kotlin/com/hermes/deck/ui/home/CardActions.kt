@@ -16,7 +16,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.dp
 import com.hermes.deck.data.AppInfo
 
@@ -27,12 +29,13 @@ fun CardActions(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val haptic  = LocalHapticFeedback.current
 
     Row(
         modifier            = modifier
             .fillMaxWidth()
-            .padding(horizontal = 48.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.SpaceEvenly,
+            .padding(horizontal = 16.dp, vertical = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(27.dp, Alignment.CenterHorizontally),
         verticalAlignment   = Alignment.CenterVertically
     ) {
         CardActionButton(
@@ -59,7 +62,10 @@ fun CardActions(
         CardActionButton(
             icon  = Icons.Outlined.VisibilityOff,
             label = "Hide",
-            onClick = onHide
+            onClick = {
+                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                onHide()
+            }
         )
     }
 }
@@ -72,7 +78,7 @@ private fun CardActionButton(icon: ImageVector, label: String, onClick: () -> Un
                 imageVector        = icon,
                 contentDescription = label,
                 tint               = MaterialTheme.colorScheme.onSurface,
-                modifier           = Modifier.size(26.dp)
+                modifier           = Modifier.size(30.dp)
             )
         }
         Text(

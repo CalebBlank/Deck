@@ -1,5 +1,6 @@
 package com.hermes.deck.data
 
+import android.app.ActivityManager
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
@@ -40,13 +41,19 @@ class RecentAppsRepository(private val context: Context) {
         emit(apps)
     }.flowOn(Dispatchers.IO)
 
+    fun killApp(packageName: String) {
+        (context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager)
+            .killBackgroundProcesses(packageName)
+    }
+
     fun hasUsagePermission(): Boolean {
-        val stats = usageStatsManager.queryUsageStats(
-            UsageStatsManager.INTERVAL_DAILY,
-            System.currentTimeMillis() - 1000,
-            System.currentTimeMillis()
+        val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as android.app.AppOpsManager
+        val mode = appOps.checkOpNoThrow(
+            android.app.AppOpsManager.OPSTR_GET_USAGE_STATS,
+            android.os.Process.myUid(),
+            context.packageName
         )
-        return !stats.isNullOrEmpty()
+        return mode == android.app.AppOpsManager.MODE_ALLOWED
     }
 
     private fun resolveAppInfo(packageName: String, lastUsed: Long): AppInfo? = try {

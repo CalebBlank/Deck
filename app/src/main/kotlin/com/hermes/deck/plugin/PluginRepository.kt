@@ -1,11 +1,16 @@
 package com.hermes.deck.plugin
 
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.Uri
 import com.hermes.deck.ui.search.SearchResult
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.withContext
 
 data class PluginInfo(
@@ -15,6 +20,25 @@ data class PluginInfo(
 )
 
 class PluginRepository(private val context: Context) {
+
+    /** Hot-ish flow: emits current plugin list immediately, then re-emits on package install/remove. */
+    fun pluginsFlow(): Flow<List<PluginInfo>> = callbackFlow {
+        trySend(discoverPlugins())
+
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context, intent: Intent) {
+                trySend(discoverPlugins())
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_PACKAGE_ADDED)
+            addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addAction(Intent.ACTION_PACKAGE_REPLACED)
+            addDataScheme("package")
+        }
+        context.registerReceiver(receiver, filter)
+        awaitClose { context.unregisterReceiver(receiver) }
+    }
 
     /** Scans installed packages for providers whose authority starts with AUTHORITY_PREFIX. */
     fun discoverPlugins(): List<PluginInfo> {
@@ -47,6 +71,7 @@ class PluginRepository(private val context: Context) {
                         val iSub    = cursor.getColumnIndex(PluginContract.COL_SUBTITLE)
                         val iIcon   = cursor.getColumnIndex(PluginContract.COL_ICON_URI)
                         val iAction = cursor.getColumnIndex(PluginContract.COL_ACTION_URI)
+                        if (iTitle < 0) return@use emptyList<SearchResult.PluginResult>()
                         while (cursor.moveToNext()) {
                             add(SearchResult.PluginResult(
                                 pluginId   = plugin.id,
