@@ -1,6 +1,7 @@
 package com.hermes.deck.ui.search.providers
 
 import com.hermes.deck.ui.search.WeatherDay
+import com.hermes.deck.ui.search.WeatherHour
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -8,6 +9,8 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 /**
  * Open-Meteo weather client — free, no API key. Geocodes a place name and fetches current conditions
@@ -18,7 +21,13 @@ object WeatherClient {
     private const val FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
     data class Geo(val lat: Double, val lng: Double, val name: String)
-    data class Forecast(val location: String, val currentTempF: Int, val currentCode: Int, val days: List<WeatherDay>)
+    data class Forecast(
+        val location: String,
+        val currentTempF: Int,
+        val currentCode: Int,
+        val days: List<WeatherDay>,
+        val hours: List<WeatherHour>,
+    )
 
     /** Resolve a place name → coordinates + a display label ("Chicago, Illinois"). */
     suspend fun geocode(name: String): Geo? = withContext(Dispatchers.IO) {
@@ -39,6 +48,7 @@ object WeatherClient {
             val url = "$FORECAST_URL?latitude=$lat&longitude=$lng" +
                 "&current=temperature_2m,weather_code" +
                 "&daily=weather_code,temperature_2m_max,temperature_2m_min" +
+                "&hourly=temperature_2m,weather_code" +
                 "&temperature_unit=fahrenheit&timezone=auto&forecast_days=5"
             val o = JSONObject(httpGet(url))
             val cur = o.optJSONObject("current") ?: return@runCatching null
@@ -55,8 +65,38 @@ object WeatherClient {
                     loF   = (mins?.optDouble(i) ?: 0.0).toInt(),
                 )
             }
-            Forecast(location, cur.optDouble("temperature_2m").toInt(), cur.optInt("weather_code"), days)
+            // Hourly: the next ~12 hours starting from the location's current hour.
+            val hours = parseHours(o.optJSONObject("hourly"), cur.optString("time"))
+            Forecast(location, cur.optDouble("temperature_2m").toInt(), cur.optInt("weather_code"), days, hours)
         }.getOrNull()
+    }
+
+    /** The next ~12 hourly entries starting at the location's current hour ("Now"). */
+    private fun parseHours(hourly: JSONObject?, currentTime: String): List<WeatherHour> {
+        hourly ?: return emptyList()
+        val times = hourly.optJSONArray("time") ?: return emptyList()
+        val temps = hourly.optJSONArray("temperature_2m")
+        val codes = hourly.optJSONArray("weather_code")
+        // ISO strings compare lexically; match to the current HOUR (ignore minutes).
+        val curHour = currentTime.take(13)   // "2026-06-11T15"
+        var start = 0
+        for (i in 0 until times.length()) {
+            if (times.optString(i).take(13) >= curHour) { start = i; break }
+        }
+        return (start until minOf(start + 12, times.length())).map { i ->
+            WeatherHour(
+                label = hourLabel(times.optString(i), i == start),
+                code  = codes?.optInt(i) ?: 0,
+                tempF = (temps?.optDouble(i) ?: 0.0).toInt(),
+            )
+        }
+    }
+
+    private fun hourLabel(iso: String, isNow: Boolean): String {
+        if (isNow) return "Now"
+        return runCatching {
+            LocalDateTime.parse(iso).format(DateTimeFormatter.ofPattern("h a"))
+        }.getOrDefault(iso)
     }
 
     private fun dayLabel(iso: String, index: Int): String {

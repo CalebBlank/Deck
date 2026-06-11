@@ -120,6 +120,7 @@ sealed class SearchResult {
         val currentTempF: Int,
         val currentCode: Int,      // WMO weather code
         val days: List<WeatherDay>,
+        val hours: List<WeatherHour> = emptyList(),
     ) : SearchResult()
 
     /** A dictionary definition (dictionaryapi.dev, no key) for "define X". Floats to the top. */
@@ -276,6 +277,13 @@ data class WeatherDay(
     val code: Int,       // WMO weather code
     val hiF: Int,
     val loF: Int,
+)
+
+/** One hour of the weather forecast. */
+data class WeatherHour(
+    val label: String,   // "Now" / "3 PM"
+    val code: Int,       // WMO weather code
+    val tempF: Int,
 )
 
 data class WidgetProviderInfo(

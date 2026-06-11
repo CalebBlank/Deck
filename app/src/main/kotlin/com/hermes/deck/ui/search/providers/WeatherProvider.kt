@@ -32,6 +32,6 @@ class WeatherProvider(private val context: Context) : SearchProvider {
             WeatherClient.Geo(loc.first, loc.second, "Your location")
         }
         val fc = WeatherClient.forecast(geo.lat, geo.lng, geo.name) ?: return emptyList()
-        return listOf(SearchResult.WeatherResult(fc.location, fc.currentTempF, fc.currentCode, fc.days))
+        return listOf(SearchResult.WeatherResult(fc.location, fc.currentTempF, fc.currentCode, fc.days, fc.hours))
     }
 }

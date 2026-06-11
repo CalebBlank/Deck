@@ -4670,10 +4670,11 @@ private fun weatherIcon(code: Int): ImageVector = when {
     else -> Icons.Outlined.Cloud                                          // partly cloudy / overcast / fog
 }
 
-/** Current conditions + a 5-day forecast strip (Open-Meteo). Informational (no tap action). */
-@OptIn(ExperimentalFoundationApi::class)
+/** Current conditions + a Daily/Hourly forecast (Open-Meteo). Informational (no tap action). */
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 private fun WeatherResultCard(result: SearchResult.WeatherResult, onConfigure: (() -> Unit)? = null) {
+    var hourly by remember { mutableStateOf(false) }
     Column(
         Modifier.fillMaxWidth()
             .then(if (onConfigure != null) Modifier.combinedClickable(onLongClick = onConfigure) {} else Modifier)
@@ -4689,16 +4690,46 @@ private fun WeatherResultCard(result: SearchResult.WeatherResult, onConfigure: (
             }
             Text(result.location, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.End)
         }
-        if (result.days.isNotEmpty()) {
+        if (result.days.isNotEmpty() || result.hours.isNotEmpty()) {
             Spacer(Modifier.height(12.dp))
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                result.days.take(5).forEach { d ->
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(d.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Icon(weatherIcon(d.code), contentDescription = WeatherClient.describe(d.code),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(22.dp).padding(vertical = 3.dp))
-                        Text("${d.hiF}°", style = MaterialTheme.typography.labelLarge)
-                        Text("${d.loF}°", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                SegmentedButton(
+                    selected = !hourly,
+                    onClick = { hourly = false },
+                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                ) { Text("Daily") }
+                SegmentedButton(
+                    selected = hourly,
+                    onClick = { hourly = true },
+                    enabled = result.hours.isNotEmpty(),
+                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                ) { Text("Hourly") }
+            }
+            Spacer(Modifier.height(10.dp))
+            if (hourly) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(18.dp),
+                ) {
+                    result.hours.forEach { h ->
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(h.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                            Icon(weatherIcon(h.code), contentDescription = WeatherClient.describe(h.code),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(22.dp).padding(vertical = 3.dp))
+                            Text("${h.tempF}°", style = MaterialTheme.typography.labelLarge)
+                        }
+                    }
+                }
+            } else {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    result.days.take(5).forEach { d ->
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(d.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Icon(weatherIcon(d.code), contentDescription = WeatherClient.describe(d.code),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(22.dp).padding(vertical = 3.dp))
+                            Text("${d.hiF}°", style = MaterialTheme.typography.labelLarge)
+                            Text("${d.loF}°", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                     }
                 }
             }
