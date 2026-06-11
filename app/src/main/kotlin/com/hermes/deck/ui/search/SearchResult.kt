@@ -121,6 +121,7 @@ sealed class SearchResult {
         val currentCode: Int,      // WMO weather code
         val days: List<WeatherDay>,
         val hours: List<WeatherHour> = emptyList(),
+        val sublabel: String? = null,   // e.g. the resolved city when location == "Your location"
     ) : SearchResult()
 
     /** A dictionary definition (dictionaryapi.dev, no key) for "define X". Floats to the top. */

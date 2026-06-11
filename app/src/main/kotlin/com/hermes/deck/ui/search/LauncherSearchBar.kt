@@ -4688,7 +4688,12 @@ private fun WeatherResultCard(result: SearchResult.WeatherResult, onConfigure: (
                 Text("${result.currentTempF}°", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
                 Text(WeatherClient.describe(result.currentCode), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Text(result.location, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.End)
+            Column(horizontalAlignment = Alignment.End) {
+                Text(result.location, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.End)
+                result.sublabel?.let {
+                    Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.End)
+                }
+            }
         }
         if (result.days.isNotEmpty() || result.hours.isNotEmpty()) {
             Spacer(Modifier.height(12.dp))
@@ -4706,12 +4711,13 @@ private fun WeatherResultCard(result: SearchResult.WeatherResult, onConfigure: (
                 ) { Text("Hourly") }
             }
             Spacer(Modifier.height(10.dp))
-            if (hourly) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(18.dp),
-                ) {
-                    result.hours.forEach { h ->
+            // Forecast strip — 5 entries (daily or hourly), with extra side margin so it isn't edge-to-edge.
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                if (hourly) {
+                    result.hours.take(5).forEach { h ->
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text(h.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                             Icon(weatherIcon(h.code), contentDescription = WeatherClient.describe(h.code),
@@ -4719,16 +4725,13 @@ private fun WeatherResultCard(result: SearchResult.WeatherResult, onConfigure: (
                             Text("${h.tempF}°", style = MaterialTheme.typography.labelLarge)
                         }
                     }
-                }
-            } else {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                } else {
                     result.days.take(5).forEach { d ->
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text(d.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Icon(weatherIcon(d.code), contentDescription = WeatherClient.describe(d.code),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(22.dp).padding(vertical = 3.dp))
                             Text("${d.hiF}°", style = MaterialTheme.typography.labelLarge)
-                            Text("${d.loF}°", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 }
