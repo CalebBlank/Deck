@@ -24,10 +24,11 @@ class InstalledAppsRepository(private val context: Context) {
                 .queryIntentActivities(intent, PackageManager.MATCH_ALL)
                 .map { ri ->
                     AppInfo(
-                        packageName = ri.activityInfo.packageName,
-                        label       = ri.loadLabel(packageManager).toString(),
-                        icon        = ri.loadIcon(packageManager),
-                        category    = ri.activityInfo.applicationInfo.category.toCategoryLabel()
+                        packageName  = ri.activityInfo.packageName,
+                        label        = ri.loadLabel(packageManager).toString(),
+                        icon         = ri.loadIcon(packageManager),
+                        category     = ri.activityInfo.applicationInfo.category.toCategoryLabel(),
+                        activityName = ri.activityInfo.name
                     )
                 }
                 .sortedBy { it.label.lowercase() }

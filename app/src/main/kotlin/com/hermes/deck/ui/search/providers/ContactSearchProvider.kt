@@ -12,11 +12,18 @@ class ContactSearchProvider(private val context: Context) : SearchProvider {
 
     override suspend fun query(q: String): List<SearchResult> {
         if (q.isBlank() || q.length < 2) return emptyList()
-        return withContext(Dispatchers.IO) { queryContacts(q) }
+        val out = withContext(Dispatchers.IO) { queryContacts(q) }
+        // Confident → rich card: a single match, or one whose name exactly matches the query.
+        val exacts = out.filter { it.name.equals(q.trim(), ignoreCase = true) }
+        return when {
+            out.size == 1    -> listOf(out[0].copy(rich = true))
+            exacts.size == 1 -> listOf(exacts[0].copy(rich = true))
+            else             -> out
+        }
     }
 
-    private fun queryContacts(q: String): List<SearchResult> {
-        val results = mutableListOf<SearchResult>()
+    private fun queryContacts(q: String): List<SearchResult.ContactResult> {
+        val results = mutableListOf<SearchResult.ContactResult>()
         val uri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
         val projection = arrayOf(
             ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,

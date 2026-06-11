@@ -7,32 +7,28 @@ import kotlinx.coroutines.flow.update
 
 object NotificationStore {
 
-    private data class Entry(val title: String, val text: String)
-
-    private val store = LinkedHashMap<String, Entry>()
+    private val packages = LinkedHashSet<String>()
 
     private val _revision = MutableStateFlow(0)
     val revision: StateFlow<Int> = _revision.asStateFlow()
 
     @Synchronized
-    fun post(packageName: String, title: String, text: String) {
-        store[packageName] = Entry(title, text)
+    fun post(packageName: String) {
+        packages.add(packageName)
         _revision.update { it + 1 }
     }
 
     @Synchronized
     fun remove(packageName: String) {
-        if (store.remove(packageName) != null) {
-            _revision.update { it + 1 }
-        }
+        if (packages.remove(packageName)) _revision.update { it + 1 }
     }
 
     @Synchronized
-    fun has(packageName: String): Boolean = store.containsKey(packageName)
+    fun has(packageName: String): Boolean = packageName in packages
 
     @Synchronized
     fun clear() {
-        store.clear()
+        packages.clear()
         _revision.update { it + 1 }
     }
 }

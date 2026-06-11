@@ -81,6 +81,119 @@ A Firefox-based browser (Fenix fork) is planned after Deck ships. Its core philo
 
 <!-- Add new entries below this line -->
 
+### Instance A — 2026-05-28 (root search providers: browser history + files)
+
+**Done:**
+- Created `ui/search/providers/BrowserHistorySearchProvider.kt`: queries SQLite history DBs of Chrome/Brave/Edge/Samsung Internet/Firefox via `su` + `/system/bin/sqlite3`. Uses `|||||` separator to avoid splitting on `|` in URLs. Firefox: discovers `.default`/`.default-release` profile dir first. SQL injection safety: escapes `'` → `''` and `"` → `""`. Requires ≥2 chars.
+- Created `ui/search/providers/FileSearchProvider.kt`: runs `find /sdcard -maxdepth 8 -iname "*q*" -type f | head -10` via `su`. Strips `'"` ` $\` from query. Requires ≥3 chars. MIME type from `MimeTypeMap`.
+- Added `BrowserHistoryResult` and `FileResult` data classes to `SearchResult.kt`.
+- Registered both providers in `SearchViewModel.factory()` (before AiProvider).
+- Updated `LauncherSearchBar.kt`: added `BrowserHistoryResultCard` + `FileResultCard` composables, updated `SearchResultRow`, `groupResults`, and `resultKey` when-blocks.
+- Updated `LauncherSheet.kt` `resultKey` function with new cases.
+- Added "Root" section (Browser History + Files toggles) in `SettingsScreen.kt` `SearchSettingsScreen`, between "System" and "Built-In" sections.
+- Added `FileProvider` to `AndroidManifest.xml` with authority `${applicationId}.fileprovider`.
+- Created `res/xml/file_paths.xml` with `<external-path name="external_storage" path="." />`.
+- Build: `assembleDebug` — BUILD SUCCESSFUL in 26s. No new errors (only pre-existing deprecation warnings).
+
+**Watch out for:**
+- `BrowserHistorySearchProvider` uses `|||||` (5 pipes) as separator — distinct enough from typical URL/title content, but if sqlite3 output is garbled, check that the separator string matches in both the SQL and the Kotlin parse.
+- `FileProvider` authority is `${applicationId}.fileprovider` — matches `context.packageName + ".fileprovider"` in `FileResultCard`.
+- Both providers silently return `emptyList()` if `suPath == null` (no root) — safe on non-rooted devices.
+
+### Instance A — 2026-05-27 (root-based live app preview loading)
+
+**Done:**
+- Created `data/LivePreviewRepository.kt`: singleton that uses `/debug_ramdisk/su` (or fallback su paths) to read WMS task snapshots from `/data/system_ce/0/snapshots/<uuid>/` and load them into `ScreenshotCache`. Parses `dumpsys activity recents` for taskId→packageName mapping; batch-copies JPEGs to `snap_tmp/` dir, decodes, caches, then deletes temp files.
+- Modified `service/ScreenshotAccessibilityService.kt`: added `CoroutineScope(Dispatchers.IO + SupervisorJob())`, calls `LivePreviewRepository.getInstance(...).refreshAll()` when user returns to launcher (pkg == packageName), cancels scope in `onDestroy()`.
+- Modified `ui/home/HomeViewModel.kt`: added `livePreviewRepo: LivePreviewRepository` as third constructor parameter, added `refreshPreviews()` method, updated factory companion to pass `LivePreviewRepository.getInstance(context.applicationContext)`.
+- Modified `ui/home/HomeScreen.kt`: added `DisposableEffect(lifecycleOwner)` with `LifecycleEventObserver` that calls `vm.refreshPreviews()` on `ON_RESUME`. Added imports for `Lifecycle`, `LifecycleEventObserver`, `LocalLifecycleOwner`.
+- Build: `assembleDebug` — BUILD SUCCESSFUL in 25s (only pre-existing deprecation warning in MainActivity.kt, no new errors).
+
+**Watch out for:**
+- `LivePreviewRepository.suPath` checks `canExecute()` on the su binary. If the device has a different su path, add it to the list in `LivePreviewRepository.suPath`.
+- `snap_tmp/` files are deleted after loading; if `refreshAll()` is interrupted mid-run, leftover temp files may remain in `context.filesDir/snap_tmp/`.
+- The `ON_RESUME` lifecycle trigger fires every time the launcher resumes — including on first launch. This is intentional (picks up any snapshots immediately), but will be a no-op if root is not available.
+
+### Instance A — 2026-05-25 (build/install run #1)
+
+**Done:**
+- Ran `assembleDebug` — BUILD SUCCESSFUL in 6s (10 executed, 27 up-to-date).
+- APK name is `deck-v91-debug.apk` (not `app-debug.apk`). `adb` is at `C:\Users\Caleb\AppData\Local\Android\Sdk\platform-tools\adb.exe` (not on PATH).
+- Installed successfully on device via `adb install -r`.
+
+**Watch out for:**
+- APK output filename follows a custom `archivesBaseName` or `versionName`-based scheme — use `Glob **/*.apk` under `app\build\outputs\apk\debug\` to find the actual file.
+
+### Instance A — 2026-05-25 (build/install run #2)
+
+**Done:**
+- Ran `assembleDebug` — BUILD SUCCESSFUL in 7s (10 executed, 27 up-to-date).
+- APK is `deck-v92-debug.apk`. Installed successfully via `adb install -r`.
+
+### Instance D — 2026-05-25 (third entry)
+
+**Done:**
+- Implemented webOS-style card stacking + reorder + fan. Four files changed:
+  - `data/CardGroup.kt` (new): `CardGroup(id, apps)` with `isStack`, `primaryApp`, `single()`, `stack()` factory methods.
+  - `HomeViewModel.kt`: `HomeUiState` now holds `cardGroups: List<CardGroup>`. Added `reorderGroups(from, to)`, `stackGroups(source, target)`, `unstackGroup(groupIdx, cardIdx)`, `dismissGroup(group)`. `refresh()` preserves existing stacks when the recency list updates. `ForegroundEventBus` inserts `CardGroup.single()` for new apps.
+  - `CardStrip.kt` (full rewrite): `HorizontalPager` replaced with `LazyRow` + `rememberSnapFlingBehavior`. Long-press + drag on the outer `Box` uses `detectDragGesturesAfterLongPress`. Dragging a card >50% over another card for 700ms triggers `onStack`. Release in open space triggers `onReorder`. Tapping a stack card toggles fan mode (`fanGroupId` state) — the stack's `DisplayItem.Card` expands to N `DisplayItem.FannedCard` entries; `animateItem()` handles the layout animation. `StackCardView` renders layered ghost cards (up to 2 behind) + count badge. `GesturableCard` gains `isDragging: Boolean` to suppress vertical drag during horizontal reorder.
+  - `HomeScreen.kt`: Updated `CardStrip` call to new signature (`cardGroups`, `onGroupTap`, `onGroupDismiss`, `onReorder`, `onStack`, `onUnstack`).
+
+**Watch out for:**
+- Stacking fires after a 700ms hover (constant `STACK_HOVER_MS`). Adjust if it feels too slow/fast.
+- `userScrollEnabled = dragInfo == null` disables LazyRow scroll during drag; there's a ~1 frame gap between long press firing and the disable taking effect (imperceptible in practice).
+- Fan open/close is toggled by tapping a stack card. Fanned card tap collapses fan + launches that app via `onGroupTap(CardGroup.single(app))` — this creates a transient single-app group just for the launch callback; the ViewModel is not mutated by this.
+
+### Instance A — 2026-05-25 (build/install run #3)
+
+**Done:**
+- Ran `assembleDebug` — BUILD SUCCESSFUL in 24s (10 executed, 27 up-to-date).
+- APK is `deck-v94-debug.apk`. Installed successfully via `adb install -r`.
+
+### Instance A — 2026-05-25 (build/install run #4)
+
+**Done:**
+- Ran `assembleDebug` — BUILD SUCCESSFUL in 20s (10 executed, 27 up-to-date).
+- APK is `deck-v95-debug.apk`. Installed successfully via `adb install -r`.
+
+### Instance A — 2026-05-26 (drag reorder teleport fix + animation tuning)
+
+**Done:**
+- Tuned gapClose animation: switched from `Spring.StiffnessVeryLow` to `tween(600, FastOutSlowInEasing)` to match `animateItem` placement curve.
+- Fixed gapClose not applying to card at distance-1 from dragged: added `when { distance == 1 -> delay(150L); distance > 1 -> delay(2000L) }` stagger.
+- Fixed opposite-side card not animating: `focusedIdx` was using `lazyListState.firstVisibleItemIndex` (always 0) — changed to `dragInfo?.groupIndex ?: ...`.
+- Fixed dragged card one-frame teleport on reorder: changed dragTransX lookup from `it.index == displayIdx` (finds wrong card in stale layoutInfo) to `it.key == group.id` (finds dragged card's actual slot in both old and new layout). Visual position = `fingerX - fingerCardX` regardless of old/new slot. Installed as v231.
+
+**Watch out for:**
+- `it.key == group.id` in `visibleItemsInfo` requires that `key = { _, group -> group.id }` remains on the `itemsIndexed` call. If the key scheme changes, this lookup breaks.
+- `di.dragTransX` (accumulated delta) is still adjusted on reorder (`-slotDelta * slotPx`) for the snap-back animation at drag end — don't remove that adjustment.
+
+---
+
+### Instance D — 2026-05-25 (second entry)
+
+**Done:**
+- Fixed search result icons (`LauncherSearchBar.kt` → `AppResultCard`): replaced synchronous `rememberDrawablePainter` (ran on composition thread, used `intrinsicWidth.coerceAtLeast(1)` which could produce 1px bitmaps, no iconShape) with async `produceState<Bitmap?>` + `withContext(Dispatchers.Default)` at 128px, with full `AdaptiveIconDrawable` safe-zone scaling and `iconShape` clipping. Matches `SheetAppListItem`/`SheetAppGridItem` pipeline exactly.
+- Added `iconShape` param to `SearchResultRow` and `AppResultCard`; `LauncherSheet.kt` now passes `iconShape = iconShape` to the `SearchResultRow` call in Searching mode.
+- Blur pill on drawer open: `SearchPill` now accepts `blurRadius: Dp`; `LauncherSheet.kt` computes `pillBlurRadius` ramp (0→8dp over first 30% of `openProgress`) and passes it through. `Modifier.blur(blurRadius)` applied inside `SearchPill` after clip+background, so the pill hazes as the drawer rises before it fades out.
+
+---
+
+### Instance D — 2026-05-24
+
+**Done:**
+- `CardStrip.kt`: replaced two-tracker `horizontalDragSeen` approach with `withTimeout + VelocityTracker` long-press handler. Now the long-press fires only if horizontal velocity at the timeout moment is < 100 px/s. Removed `horizontalDragSeen` variable; set `onLongPress = null` on `GesturableCard` (the custom pointerInput handles it). Fixes overview mode flash for "press-then-swipe" gestures.
+- `HomeScreen.kt`: replaced full pointer-consuming overlay (`overlayActive`) with targeted `drawerGestureBlocked` cooldown (300ms). Overlay was blocking ALL interactions after drawer close (freeze). New approach only blocks the upward-swipe-to-open gesture for 300ms; cards, search, and tapping all work immediately after the drawer closes.
+- Build successful (both fixes installed).
+
+### Instance A — 2026-05-25
+
+**Done:**
+- Removed overview mode entirely (user request). Deleted all overview state, gestures, and animations from `CardStrip.kt`, `HomeScreen.kt`, `HomeViewModel.kt`. Also removed `moveCardLeft`/`moveCardRight` from ViewModel (only accessible via overview mode).
+- Fixed drawer back gesture: moved `BackHandler` from `AppDrawer.kt` into `HomeScreen.kt` (`BackHandler(enabled = drawerIsOpen)`), removed it from AppDrawer. BackHandler in AppDrawer was unreliable.
+- Fixed drawer can't-reopen: replaced `drawerGestureBlocked` 300ms cooldown (which could get stuck) with a direct `currentDrawerOpen.value` check in the swipe gesture guard. Drawer open gesture is simply blocked while the drawer is already open.
+- Build successful (installed on device).
+
 ### Claude Code (second instance) — 2026-05-22
 
 **Done:**
@@ -171,6 +284,14 @@ Owns: `ui/search/`, `ui/drawer/`, `data/`, `service/`, `plugin/`, `ui/home/CardA
 
 ---
 
+### Instance A — 2026-05-25 (build/install run #3)
+
+**Done:**
+- Ran `assembleDebug` — BUILD SUCCESSFUL in 17s (10 executed, 27 up-to-date).
+- APK is `deck-v93-debug.apk`. Installed successfully via `adb install -r` (streamed install, Success).
+
+---
+
 ### Claude Code (main conversation) — 2026-05-22 (second pass)
 
 **Done:**
@@ -221,6 +342,34 @@ Options:
 - The 48dp Box handler is the sole source of drag deltas and settle signals. If you add another gesture handler in this area, ensure it does NOT also emit to `drawerDragDeltaFlow` or `drawerSettleFlow` — duplicate emissions restart the loop.
 
 Which approach do you prefer? Add a reply below and update the ownership table.
+
+---
+
+### Instance A — 2026-05-28 (v352–v355: blur, dismiss, live-task filter, recents gesture)
+
+**Done:**
+- **Wallpaper blur** (`HomeScreen.kt`, `themes.xml`): removed `WallpaperBackground` (was a redundant bitmap copy of the wallpaper). All graphicsLayer/Compose blur approaches silently fail in the launcher window (system compositor constraint). Switched to `Window.setBackgroundBlurRadius()` via a `SideEffect` driven by an animated `blurFraction` float. Added `windowIsTranslucent=true` to `themes.xml` (required for the blur to render). Radius maps to 0–80px.
+- **App dismiss removes from Android recents** (`LivePreviewRepository.kt`): `am task remove` does not exist on Android 15. Replaced with `am stack remove <taskId>`. Also reverted a broken v349 `parseRecentTasks()` to the simple block-based parser (regex on `taskId=` and `mActivityComponent=` fields per `* Recent #N:` block).
+- **Previews load on first open** (`HomeViewModel.kt`): added `refreshPreviews()` call to `init` block so snapshots start loading on ViewModel creation, not just on `ON_RESUME`.
+- **Live-task filter** (`LivePreviewRepository.kt`, `HomeViewModel.kt`): `getRecentApps()` uses a 48h UsageStats window which returns apps with no live task. Added `getLiveTaskPackages()` (public suspend fun wrapping `parseRecentTasks()`) and used it in `HomeViewModel.refresh()` to filter out apps that aren't in `dumpsys activity recents`. Guard: if root unavailable and set is empty, filter is skipped.
+- **Recents gesture toggle** (`SettingsScreen.kt`): the existing toggle was calling `settings put secure navigation_mode` without a full path (PATH not set under `su -c`) and without restarting SystemUI, so the change had no visible effect. Fixed: use `/system/bin/settings` full path; append `&& am crash com.android.systemui` so SystemUI restarts immediately and picks up the new mode.
+
+**Watch out for:**
+- `am crash com.android.systemui` causes a brief SystemUI flicker when the recents gesture toggle is flipped — this is expected and unavoidable.
+- `getLiveTaskPackages()` runs a shell command on every `refresh()` call. The `refresh()` loop runs every 30s, plus on every resume — acceptable, but don't add more callers.
+- `parseRecentTasks()` only returns packages where `mActivityComponent=` is present in the task block. Packages with no activity component (rare edge case) won't appear in `livePackages` and will be filtered out of cards even if technically in recents.
+
+### Instance B — 2026-05-25
+
+**Done:**
+- Ran `.\gradlew installDebug` — BUILD SUCCESSFUL in 57s. Installed `deck-v76-debug.apk` on Clicks_Communicator(AVD) - 17.
+- No compile errors. 6 deprecation warnings only (non-blocking), all in `LauncherSheet.kt`: `LocalLifecycleOwner` (line 175), `NestedScrollSource.Drag` (lines 312, 330), `Icons.Filled.ArrowBack` (lines 609, 1189, 1291).
+
+### Instance B — 2026-05-25 (second run)
+
+**Done:**
+- Ran `.\gradlew installDebug` — BUILD SUCCESSFUL in 54s. Installed `deck-v77-debug.apk` on Clicks_Communicator(AVD) - 17.
+- No compile errors. Same 6 deprecation warnings as previous run, all in `LauncherSheet.kt` (non-blocking). Nothing to fix.
 
 ---
 
@@ -3839,6 +3988,16 @@ LaunchedEffect(query) {
 
 `savedResults` is NOT cleared when `query` becomes `""` (from `vm.clearQuery()` in `onActiveChange`) — that would wipe out results we need for `onSearch`, which fires just after `onActiveChange`.
 
+### Instance A — 2026-06-04 (Reverb plugin results: favicons + 2-line titles — Deck v632)
+
+Reverb's search provider (`com.hermes.deck.plugin.reverb`) was finished on its own side (45s reading-list cache + a Google-favicon https `icon_uri`). Two matching fixes in Deck's `PluginResultCard` (`LauncherSearchBar.kt`) so those results render right:
+- **No image:** the icon loader handled only `content://` (`openFileDescriptor`), so the https favicon silently failed → `Icons.Default.Extension` fallback. Now branches on URI scheme — `http`/`https` → manual `HttpURLConnection` + `BitmapFactory.decodeStream` on IO (Deck has no Coil; it already holds INTERNET); the `content://` path is unchanged.
+- **Long titles:** `headlineContent` `Text` was unbounded → wrapped to many lines. Now `maxLines = 2` + ellipsis; subtitle `maxLines = 1`.
+
+Generic to ANY plugin that hands an http(s) icon, not just Reverb. Build + installed `deck-v632-debug.apk` (a11y re-enabled on the phone). User already sees Reverb results in Deck; to confirm: favicons now render + titles cap at 2 lines. No other Deck files touched. (Note: provider stays openly exported — signature-permission lockdown shared with Deck is still a deferred follow-up.)
+
+**v633 addendum — favicon top-aligned.** `PluginResultCard` swapped from `ListItem` (centers its leading slot against a 2-line title) to a top-aligned `Row` (`verticalAlignment = Alignment.Top`, icon + weighted Column[title, subtitle], `start=16.dp` gap, `bodyLarge`/`bodyMedium` to match ListItem). Favicon now aligns to the title's first line. `deck-v633-debug.apk`.
+
 ---
 
 ### Instance C — 2026-05-23 (CardStrip shadow padding fix)
@@ -4150,3 +4309,1458 @@ Reason: On Pixel 9 Pro (448dp screen), 36dp peek left only ~9dp of adjacent card
 No fixes were required.
 
 ---
+
+### Instance A — 2026-05-24 (cards animation flash fix)
+
+**Done:**
+
+1. **Scale animation overshoot eliminated** (`CardStrip.kt` lines 134, 139)
+   - Changed `animationSpec = cardSpring` → `animationSpec = tween(300)` for both `maxScale` and `minScale` `animateFloatAsState` blocks.
+   - Root cause: `cardSpring` uses `DampingRatioMediumBouncy` (ζ=0.5), which overshoots by ~16.3% of the total change. On a 1.0→0.48 transition the spring briefly reaches scale ~0.395 — appearing as ~40% of normal card size. A 67ms (2-frame) window captured this at or near peak overshoot, producing the "all cards tiny" flash.
+   - Fix: `tween(300)` (matching peek/spacing animations) has no overshoot by definition.
+
+2. **Accidental overview-mode activation guard** (`CardStrip.kt` line 243)
+   - `onLongPress` now checks `kotlin.math.abs(pagerState.currentPageOffsetFraction) < 0.05f` before calling `onEnterOverview()`.
+   - Prevents overview from activating if the pager is mid-scroll when the long-press fires (e.g. finger pauses briefly during a swipe).
+
+**No build run yet — Instance B should build and install.**
+
+---
+
+### Instance B — 2026-05-24 (build + install after scale animation + long-press guard)
+
+**Done:**
+
+1. **Build + install** — `.\gradlew installDebug` BUILD SUCCESSFUL in 2m 7s (35 actionable tasks: 5 executed, 31 up-to-date). APK `deck-v27-debug.apk` installed on `Clicks_Communicator(AVD) - 17`.
+
+**No compile errors.** Both Instance A changes compiled cleanly:
+- `CardStrip.kt`: `animationSpec = cardSpring` → `animationSpec = tween(300)` on both `maxScale` and `minScale` `animateFloatAsState`. ✓
+- `CardStrip.kt`: `onLongPress` guard `abs(pagerState.currentPageOffsetFraction) < 0.05f`. ✓
+
+**Warnings:** Only the pre-existing `AppOpsManager.checkOpNoThrow` deprecation. No new warnings.
+
+---
+
+### Instance A — 2026-05-24 (stableOverviewMode debounce — revised flash fix)
+
+**Done:**
+
+Previous fixes (tween + pagerState guard) didn't eliminate the flash because:
+- `tween(300)` still animates scale/peek visibly within the 67ms accidental-activation window
+- The `pagerState.currentPageOffsetFraction` guard only blocks mid-scroll long press; the actual trigger is long press on a stationary card (offset ≈ 0)
+
+**Real root cause:** When a long press fires and the user lifts immediately, `overviewMode` toggles true→false in ~67ms. All visual state (scale, peek, spacing) was reacting immediately to `overviewMode`, so even a 67ms activation produced a visible flash.
+
+**Fix:** Added `stableOverviewMode` debounce inside `CardStrip`:
+- `stableOverviewMode` delays `true` by 100ms but tracks `false` immediately
+- All visual/gesture code (peekHorizontal, pageSpacing, beyondBoundsPageCount, flingBehavior, maxScale, minScale, scale, swingRotation, dimAlpha, translationX, pointerInput, GesturableCard.overviewMode param) now uses `stableOverviewMode` instead of `overviewMode`
+- `onTap` uses a `when` that handles three cases: stable overview → exit; no overview → tap card; overviewMode=true but stableOverviewMode=false → ignore (accidental window)
+- `onLongPress` still checks real `overviewMode`
+- Added `import kotlinx.coroutines.delay`
+
+A 67ms accidental activation never reaches `stableOverviewMode=true`, so zero visual change occurs. Intentional long press (finger stays down through the 100ms window) works normally.
+
+**No build run yet — Instance B should build and install.**
+
+---
+
+### Instance A — 2026-05-24 (horizontal drag cancels long-press-to-overview)
+
+**Root cause (revised):** `stableOverviewMode` debounce only prevents < 100ms blink activations. Slow swipes (finger stationary on card ~600ms) still fully trigger overview mode because the 500ms long press + 100ms debounce both elapse before the swipe gesture starts. The existing `pagerState.currentPageOffsetFraction < 0.05f` guard doesn't help because the pager doesn't update that value until after stealing the gesture — which happens after the long press fires.
+
+**Fix:** Per-card `horizontalDragSeen` flag (`var horizontalDragSeen by remember(app.packageName) { mutableStateOf(false) }`). A second `pointerInput(app.packageName)` on the card Box tracks horizontal movement from every pointer-down using `PointerEventPass.Initial` (before any child consumes). If cumulative X > 6dp is seen, `horizontalDragSeen = true`. The `onLongPress` guard now also checks `!horizontalDragSeen`. Reset to `false` on each new pointer-down. Added imports: `awaitEachGesture`, `awaitFirstDown`, `PointerEventPass`.
+
+**No build run yet — Instance B should build and install.**
+
+---
+
+
+### Instance B — 2026-05-24 (build + install after stableOverviewMode debounce)
+
+**Done:**
+
+1. **Build + install** — `.\gradlew installDebug` BUILD SUCCESSFUL in 44s (36 actionable tasks: 5 executed, 31 up-to-date). APK `deck-v27-debug.apk` installed on `Clicks_Communicator(AVD) - 17`.
+
+**No compile errors.** Instance A changes compiled cleanly:
+- `import kotlinx.coroutines.delay` added. ✓
+- `stableOverviewMode` state + 100ms debounce `LaunchedEffect` added. ✓
+- ~13 occurrences of `overviewMode` replaced with `stableOverviewMode` in visual/gesture code. ✓
+- `onTap` lambda updated to `when` expression. ✓
+
+**Warnings:** Only the pre-existing `AppOpsManager.checkOpNoThrow` deprecation. No new warnings.
+
+---
+
+### Instance B — 2026-05-24 (build + install after horizontal drag cancellation fix)
+
+**Done:**
+
+1. **Build + install** — `.\gradlew installDebug` BUILD SUCCESSFUL in 1m 27s (36 actionable tasks: 5 executed, 31 up-to-date). APK `deck-v27-debug.apk` installed on `Clicks_Communicator(AVD) - 17`.
+
+**No compile errors.** Instance A changes compiled cleanly:
+- `awaitEachGesture`, `awaitFirstDown`, `PointerEventPass` imports added. ✓
+- `var horizontalDragSeen by remember(app.packageName) { mutableStateOf(false) }` state added per-card. ✓
+- Second `.pointerInput(app.packageName)` block tracking cumulative X > 6dp added on card Box. ✓
+- `onLongPress` guard updated to also check `!horizontalDragSeen`. ✓
+
+**Warnings:** Only the pre-existing `AppOpsManager.checkOpNoThrow` deprecation. No new warnings.
+
+---
+
+### Instance A — 2026-05-24 (drawer reopens after back gesture)
+
+**Root cause:** `onClose()` fires as soon as `targetValue = Closed` (before animation completes). This removes the pointer-consuming overlay Box immediately while the drawer is still visually animating. The back gesture's pointer events (finger still moving/lifting) then reach the outer Box gesture detector via `awaitFirstDown(requireUnconsumed = false)`, are interpreted as an upward swipe, and emit `drawerOpenSignal` — reopening the drawer.
+
+**Fix** (`HomeScreen.kt`):
+- `overlayActive` state: mirrors `drawerIsOpen=true` immediately but delays `false` by 350ms.
+- `LaunchedEffect(drawerIsOpen)` with `delay(350)` drives it.
+- Overlay Box: `drawerIsOpen` → `overlayActive`.
+- Outer gesture guard: `currentDrawerOpen.value` → `currentOverlayActive.value`.
+- Bottom-3%-swipe-to-close path still guards on `currentDrawerOpen.value`.
+- Added `import kotlinx.coroutines.delay`.
+
+**No build run yet — Instance B should build and install.**
+
+---
+
+
+### Instance A — 2026-05-25 (remove overview mode + fix drawer back/reopen)
+
+**Done:**
+
+Removed overview mode entirely (user request — not enough benefit):
+- `CardStrip.kt`: removed `overviewMode`, `onEnterOverview`, `onExitOverview`, `onCardMoveLeft`, `onCardMoveRight` params, `stableOverviewMode` debounce, `isDragging`/`dragOffsetX`/`signedPageOffset`/`swingRotation`, both pointerInput blocks (overview drag + long-press), animated peek/spacing. Simplified scale to `lerp(0.90f, 1.0f, 1f - pageOffset)`. `GesturableCard` no longer has `overviewMode` or `onLongPress` params.
+- `HomeViewModel.kt`: removed `_overviewMode` StateFlow, `overviewMode`, `enterOverviewMode()`, `exitOverviewMode()`, `moveCardLeft()`, `moveCardRight()`.
+- `HomeScreen.kt`: removed `overviewMode` collection, `BackHandler(enabled = overviewMode)`, `drawerGestureBlocked` + LaunchedEffect. Simplified gesture guard to `if (currentDrawerOpen.value || currentSearchActive.value) return@awaitEachGesture`.
+
+Fixed back gesture not closing drawer:
+- **Root cause**: the no-op `OnBackPressedCallback(true)` in `MainActivity.onCreate()` (registered before `setContent`, lowest LIFO priority) fires when all Compose BackHandlers are disabled. It swallowed every back press silently.
+- **Fix** (`MainActivity.kt`): changed `handleOnBackPressed() { /* no-op */ }` → `handleOnBackPressed() { homeVm.requestDrawerClose() }`.
+
+Fixed drawer not reopening after first close:
+- **Root cause**: `settleFlow(lowVelocity)` path — physics kept drawer Closed when velocity was low and position barely moved; `targetValue` stayed Closed, `onOpen()` never fired, `drawerIsOpen` never became `true`.
+- **Fix** (`HomeScreen.kt`): gesture release always emits `drawerOpenSignal` (forces `state.settle(-1_000_000f)` regardless of release velocity): `if (tookControl) { drawerOpenSignal.tryEmit(Unit) }`.
+
+Restored AppDrawer BackHandler (had been incorrectly removed in a prior session):
+- `AppDrawer.kt`: `BackHandler(enabled = state.targetValue == DrawerValue.Open)` calls `state.settle(1_000_000f)` directly as highest-priority handler.
+
+**Build:** SUCCESSFUL (17s), installed on Clicks_Communicator(AVD) - 17.
+
+**Instance B: please test the following on device:**
+1. Open drawer → press back → drawer should close
+2. Open drawer → close it → swipe up again → drawer should reopen (this was broken before)
+3. Open drawer → swipe down to close → press back on home screen → should do nothing (no-op via `requestDrawerClose()` when drawer already closed is harmless)
+4. Regression: swipe up from bottom of home screen opens drawer
+5. Regression: search bar still works (tap search bar, type, results appear)
+
+---
+
+### Instance A — 2026-05-25 (build verification)
+
+**Done:**
+- Ran `.\gradlew installDebug` — BUILD SUCCESSFUL in 15s.
+- APK: `deck-v37-debug.apk`, installed on `Clicks_Communicator(AVD) - 17`.
+- 36 actionable tasks: 11 executed, 25 up-to-date. No errors, no new warnings.
+
+---
+
+### Instance A — 2026-05-25 (full drawer/search redesign)
+
+**Done:** Complete rewrite of `LauncherSheet.kt` and major changes to `AppDrawer.kt`. The old `AppDrawer` + `LauncherSearchBar` bottom-sheet approach is replaced by a two-layer architecture in `LauncherSheet`.
+
+**`LauncherSheet.kt`** (complete rewrite):
+- **Two-layer layout**: Layer 1 = drawer box (behind, height-animated); Layer 2 = floating search pill (in front, always at bottom).
+- **`SheetMode` enum**: `Collapsed`, `Focused`, `Searching`, `DrawerOpen`.
+- **Height-based animation**: `Animatable(0f)` grows to `maxDrawerHeight`. Drawer bottom pinned at `pillBottomY = fullHeightPx - navBarPx - 8.dp`. Avoids offset-based approach that caused drawer to slide from screen bottom rather than expand from pill.
+- **Pill alpha**: `0f` when Searching (field moves into drawer top), `1f` when Focused, `1f - drawerHeightAnim.value/maxDrawerHeight` otherwise (fades immediately on drag).
+- **Dynamic corner radius**: `(height/2f).coerceAtMost(28dp)` prevents corner squish artifact during close animation.
+- **NestedScrollConnection**: `onPreScroll` intercepts upward scroll when partially closed (enables mid-swipe reversal while closing); `onPostScroll` handles downward drag to shrink height; `onPreFling` velocity+position snap (FLING_OPEN_THRESHOLD=500f, FLING_CLOSE_THRESHOLD=100f, SWIPE_COMMIT_FRACTION=0.35f).
+- **Pill drag**: `VelocityTracker`-based gesture with both upward (open) and downward reversal (close) branches.
+- **Snap on close**: same threshold/velocity logic applies when closing.
+- **Colors**: pill and drawer both use `MaterialTheme.colorScheme.surfaceContainerHigh`; both use `RoundedCornerShape(28.dp)`.
+- **Keyboard**: pill uses `WindowInsets.ime.union(WindowInsets.navigationBars)` so it floats above keyboard.
+- **Searching state**: `Column` with `ActiveSearchField` at top + `LazyColumn` results below; pill hidden (alpha=0).
+- **List/Grid view**: respects `DrawerViewMode` from `DrawerViewModel`; `LazyColumn` for List, `LazyVerticalGrid` for Grid.
+- **AlphabetSlider**: overlaid in `DrawerOpen` state via `Box` wrapping, right edge, 20dp wide, full height.
+- **Imports added**: `import com.hermes.deck.ui.drawer.AlphabetSlider`, plus all required foundation/animation/coroutine imports.
+
+**`AppDrawer.kt`**:
+- `AlphabetSlider` changed from `private` to `internal` so `LauncherSheet` can reuse it.
+- `AlphabetSlider` now tracks finger Y position (`activeY: Float`): indicator is a 52dp circle (`titleLarge` text) positioned via `Alignment.TopEnd` + dynamic Y offset, following the finger up/down.
+- Added `import androidx.compose.ui.platform.LocalDensity` (was missing, caused compile error).
+
+**Watch out for:**
+- `LauncherSheet` no longer accepts `backspaceEvent` — `HomeScreen.kt` was already updated to not pass it.
+- `AppDrawer.kt`'s `AlphabetSlider` signature: `scrollToIndex: suspend (Int) -> Unit` (was `LazyGridState` — breaking internal to AppDrawer only).
+- `HomeScreen.kt` Spacer at bottom is `80.dp + navBarBottom + 24.dp` — may want to reduce to 8dp to match new `bottomGapPx`, but left as-is since `LauncherSheet` handles its own spacing.
+
+**Build:** `.\gradlew installDebug` — BUILD SUCCESSFUL in 1m 7s. APK `deck-v38-debug.apk` installed on `Clicks_Communicator(AVD) - 17`. No errors, no new warnings.
+
+---
+
+### Instance B — 2026-05-25 (build verification)
+
+**Done:**
+- Ran `.\gradlew installDebug` — **BUILD SUCCESSFUL** in 19s.
+- APK: `deck-v71-debug.apk`, installed on `Clicks_Communicator(AVD) - 17`.
+- 38 actionable tasks: 11 executed, 27 up-to-date. No compile errors. No new warnings beyond the pre-existing `AppOpsManager.checkOpNoThrow` deprecation.
+
+### Instance B — 2026-05-25 (second build verification)
+
+**Done:**
+- Ran `.\gradlew installDebug` — **BUILD SUCCESSFUL** in 1m 6s.
+- APK: `deck-v72-debug.apk`, installed on `Clicks_Communicator(AVD) - 17`.
+- 38 actionable tasks: 11 executed, 27 up-to-date. No compile errors.
+- Warnings (non-blocking, pre-existing in `LauncherSheet.kt` only):
+  - `LocalLifecycleOwner` deprecated (moved to lifecycle-runtime-compose)
+  - `NestedScrollSource.Drag` deprecated (replaced by `UserInput`)
+  - `Icons.Filled.ArrowBack` deprecated (use `AutoMirrored` variant)
+- No new warnings vs. previous build.
+
+### Instance B — 2026-05-25 (third build verification)
+
+**Done:**
+- Ran `.\gradlew installDebug` — **BUILD SUCCESSFUL** in 2m 15s.
+- APK: `deck-v73-debug.apk`, installed on `Clicks_Communicator(AVD) - 17`.
+- 38 actionable tasks: 11 executed, 27 up-to-date. No compile errors.
+- Warnings (non-blocking, pre-existing in `LauncherSheet.kt` only):
+  - `LocalLifecycleOwner` deprecated (moved to lifecycle-runtime-compose)
+  - `NestedScrollSource.Drag` deprecated (replaced by `UserInput`)
+  - `Icons.Filled.ArrowBack` deprecated (use `AutoMirrored` variant)
+- No new warnings vs. previous build.
+
+### Instance B — 2026-05-25 (build verification)
+
+**Done:**
+- Fixed compile error before build: `CardStrip.kt` line 72 used `highVelocityAnimationSpec` which does not exist in Compose Foundation 1.x (BOM 2024.12.01). Replaced with `decayAnimationSpec = exponentialDecay(frictionMultiplier = 3f)`.
+- Ran `.\gradlew installDebug` — **BUILD SUCCESSFUL** in 58s.
+- APK: `deck-v75-debug.apk`, installed on `Clicks_Communicator(AVD) - 17`.
+- 38 actionable tasks: 11 executed, 27 up-to-date. No new warnings beyond pre-existing `LauncherSheet.kt` deprecations.
+
+### Instance B — 2026-05-25 (build check)
+
+**Done:**
+- Ran `.\gradlew installDebug` — **BUILD SUCCESSFUL** in 1m 4s.
+- APK: `deck-v78-debug.apk`, installed on `Clicks_Communicator(AVD) - 17`.
+- 38 actionable tasks: 11 executed, 27 up-to-date. No compile errors. No new warnings.
+
+### Instance A — 2026-05-26
+
+**Done:**
+- Fixed card-teleports-to-opposite-side bug on reorder. Root cause: after `onReorderGroup()` fires, for 1 frame `visibleItemsInfo` is stale, making `naturalLeft` wildly wrong.
+- Implemented hybrid dragTransX: uses `fingerX - fingerCardX - naturalLeft` (old formula) when `cardInfo` is non-null; falls back to accumulated `di.dragTransX` when `cardInfo` is null (stale layout frame after reorder).
+- Built `deck-v197-debug.apk` — BUILD SUCCESSFUL in 6s. Installed via `adb install -r`.
+
+**Watch out for:**
+- A separate "card two spots over appears" issue (off-screen LazyRow item with no previous position for animateItem) remains. `fadeInSpec = tween(120)` softens it. `beyondBoundsItemCount` not available in this Compose version.
+
+### Instance A — 2026-05-26 (gapClose slide-in fix)
+
+**Done:**
+- Fixed off-screen card "popping in" at the gapClose-shifted position after a reorder. Root cause: `animateFloatAsState` starts at the target value on first composition; a card entering the LazyRow mid-drag immediately had gapClose ≈ -0.7 * itemW, making it appear where the hovered card was.
+- Fix: replaced `animateFloatAsState` for gapClose with `Animatable(0f) + LaunchedEffect(gapClose)`. Card now starts at 0 (its natural slot) and slides to the gapClose target at the same spring speed as `animateItem` (StiffnessMediumLow + DampingRatioNoBouncy).
+- Built `deck-v198-debug.apk`, installed.
+
+### Instance A — 2026-05-26 (N+2 card stagger fix)
+
+**Done:**
+- Added stagger delay for cards entering the LazyRow mid-drag at distance > 1 from the focused index.
+- Root cause: when the hovered card slides out of its slot, the N+2 card (previously off-screen) enters LazyRow composition simultaneously. `Animatable(0f)` starts at 0 but then animates immediately, so both the hovered card and N+2 card start moving at the same time — they appear to enter frame together.
+- Fix: inside `LaunchedEffect(gapClose)`, added `if (gapClose != 0f && animGapCloseAnim.value == 0f && distance > 1) delay(400L)` before `animateTo(gapClose, ...)`. The `animGapCloseAnim.value == 0f` condition fires only for cards newly entering composition (Animatable still at its initial value); settled cards are unaffected.
+- Built `deck-v211-debug.apk`, installed via `adb install -r`.
+
+---
+
+### Instance A — 2026-05-26 (peeking card vanish — attempts v249–v252)
+
+**Problem:** The peeking card on the OPPOSITE side from the drag direction instantly vanishes when drag starts. User confirmed: (a) the card "just vanishes" — instantaneous, not a gradual shrink; (b) it happens "exactly when the right card starts sliding over" — correlated with the 150ms gapClose animation starting; (c) screenshot confirmed the peeking card's visual center IS within the viewport.
+
+**Attempts and outcomes:**
+
+- **v249 (gapClose=0.155f + edge TransformOrigin):** Added `transformOrigin = TransformOrigin(1f,0.5f)` for left peeking card, `(0f,0.5f)` for right, plus `gapClose` at 0.155f multiplier. User: "Still doesn't work."
+- **v250 (zIndex fix — isTargetNeighbor=3f):** Gave peeking cards zIndex=3f to draw above dragged card. User: "Why is the card I'm dragging drawing under the other cards now?" — reverted. Dragged card must always be on top (2f).
+- **v251 (peekEdgeComp explicit translation, no transformOrigin):** Added `peekEdgeComp = dir * (itemW / 2f) * (1f - baseScale)` as explicit translationX compensation to pin the visible edge in place during scale-down. Removed transformOrigin change entirely. Not yet confirmed by user at time of compression.
+
+**Root cause analysis after user confirmed timing:**
+- The vanish is NOT a gradual scale shrink (confirmed by user)
+- It occurs at ~150ms (when gapClose animations start), NOT at t=0ms (when `isAnyDragging` first becomes true)
+- Hypothesis: `animateItem(placementSpec=tween(600))` is applied with `fadeInSpec/fadeOutSpec=null` when `isAnyDragging=true`. When `animGapCloseAnim` starts its `animateTo()` at 150ms, something in Compose's item placement animation machinery interacts with the graphicsLayer `translationX` change, causing the item to briefly exit composition or its fade-out to fire instantly (since `fadeOutSpec=null`)
+- Alternative: `animateItem`'s internal state resets when its parameters change (`fadeInSpec/fadeOutSpec` going null when `isAnyDragging` becomes true), and a reset of the internal animation during an in-flight fade could cause instant removal
+
+**v252 fix:** Changed `animateItem` condition from `!isDragged && !isCollapsing && !isExpanding` to `!isDragged && !isCollapsing && !isExpanding && !isAnyDragging`. When dragging, `animateItem` is not applied at all — no internal placement animation can interfere with graphicsLayer translations. Trade-off: stacked-card removal during drag won't have a 120ms fade-out, but that's acceptable.
+
+**Watch out for (future instances):**
+- `animateItem` must NOT be applied when `isAnyDragging = true`. The combination of `placementSpec = tween(600)` (or any non-null spec) and graphicsLayer `translationX` changes causes peeking card vanish.
+- Do NOT add `fadeOutSpec = null` to `animateItem` as a workaround — null fadeOutSpec makes item removal even more abrupt. The fix is to skip `animateItem` entirely during drag.
+- `peekEdgeComp` translation (added in v251) remains in the code — it compensates for center-pivot scale on off-center cards and should stay.
+- The 150ms `delay` in `LaunchedEffect(gapClose)` (for first-time animation start) is needed to prevent pop-in; do not remove it.
+
+---
+
+### Instance A — 2026-05-26 (drag reorder animation — v270–v277, many failed approaches)
+
+**Goal:** When user drags card B (center) over card C (right-peek), the desired visual result is: A off-screen, C at left-peek, center slot empty (B at finger), D at right-peek. All cards should slide smoothly into the new positions.
+
+**What the reorder logic computes (correct math):**
+- `target = 2` (C's index), `dragged = 1` (B's index)
+- `dir = -1` (target > dragged), `newIndex = 1` (C moves to idx 1)
+- `dAfterInsert = 2` (B's new index after C moves to idx 1)
+- `onReorderGroup(2, 1)` → list becomes [A(0), C(1), B(2), D(3)]
+- For the desired visual: need `fvi = 2` (B at center slot, but dragged so slot appears empty; C at left-peek idx 1; D at right-peek idx 3)
+
+**Approaches tried — all reported "nothing changed" by user:**
+
+1. **v270 — `requestScrollToItem` before `onReorderGroup`**: `lazyListState.requestScrollToItem(dAfterInsert, 0)` (non-suspend) then `onReorderGroup`. Result: "card on the opposite side sliding into the slot it already occupied from the edge." A slides wrong direction.
+
+2. **v271 — `scrollToItem` before `onReorderGroup`**: `scrollToItem(2, 0)` first, then `onReorderGroup(2, 1)`. Root cause of failure: LazyList uses the item AT fvi as its anchor key. After `scrollToItem(2)`, item C (at index 2 pre-reorder) becomes the anchor. When `onReorderGroup(2, 1)` then moves C to index 1, the LazyList adjusts fvi back to 1 to keep C centered — undoing the scroll.
+
+3. **v272 — manual `reorderOffsets` per-card translationX**: Added `mutableStateMapOf<String, Float>` for per-card offsets, `var reorderFraction`. CATASTROPHIC — when `LaunchedEffect` was cancelled mid-animation (user moved away), `reorderFraction` got stuck, stale offsets caused cards to appear at wrong positions even during normal scrolling. User: "Apps on the left disappear. Apps on the right are too big. Can't scroll to the last card." Fully reverted.
+
+4. **v273 — `scrollToItem` + `snapshotFlow.first` before `onReorderGroup`**: Tried waiting for fvi to reach `dAfterInsert` before reordering. Had no effect — anchor reversal happened regardless.
+
+5. **v274 — `onReorderGroup` then `scrollToItem`**: Swapped order: reorder first, then scroll. User: "Nothing changed."
+
+6. **v275 (current, versionCode 277) — same as v274 with cleaned-up comments**: No new approach, just code cleanup. User: "The change didn't change anything."
+
+**Root cause hypothesis:** `scrollToItem` may be having no effect because of a race condition: `onReorderGroup` schedules a recomposition that happens asynchronously. If `scrollToItem` runs BEFORE the recomposition frame with the new list, the LazyList anchor behavior during that subsequent recomposition undoes the scroll. The fix is to wait for the recomposition frame to land BEFORE calling scroll.
+
+**New approach (v278):** Add `withFrameNanos { }` between `onReorderGroup` and the scroll to let the recomposition settle. Also switch from `scrollToItem` (instant, lower-level) to `animateScrollToItem` (animated, different internal code path). The animation also provides the smooth "cards sliding to new positions" visual the user wants — no separate per-card animation needed.
+
+```kotlin
+onReorderGroup(target, newIndex)
+withFrameNanos { }  // wait for recomposition with new list before scrolling
+lazyListState.animateScrollToItem(dAfterInsert, 0)
+```
+
+`withFrameNanos` is in `androidx.compose.runtime.*` (already imported). No new imports needed.
+
+**Watch out for (future instances):**
+- Do NOT use `requestScrollToItem` or `scrollToItem` immediately after `onReorderGroup` — the recomposition race condition undoes the scroll via anchor key behavior.
+- Do NOT try per-card `reorderOffsets` via `mutableStateMapOf` for reorder animation — if the `LaunchedEffect` is cancelled mid-animation (user moves finger), offsets get stuck and break normal scrolling. Any per-card approach MUST have a `finally { reset all offsets }` block.
+- D (card that should appear at right-peek after reorder) is off-screen and NOT in LazyRow composition while fvi=1. It only enters composition after fvi changes to 2 (via scroll). This is why pure translationX animation without scroll cannot show D.
+- `dragInfo.groupIndex` must be updated to `dAfterInsert` after reorder — the `onDrag` handler uses `visible.firstOrNull { it.index == cur.groupIndex }` to find the dragged card, which breaks if groupIndex is stale.
+- `animateItem` must stay disabled during drag (`!isAnyDragging` condition). Do NOT re-enable it — causes peeking card vanish (documented above in v249–v252 entry).
+
+**Build:** Instance B should build and install after this entry.
+
+---
+
+### Instance A — 2026-05-27 (drag reorder animation — v280, fresh approach)
+
+**User insight:** "As you move C left one slot, you move the viewport right one slot." The animation is NOT a scroll call — it's a per-card translationX on C that cancels C's visual jump, then animates back to 0.
+
+**Root cause of all prior failures:** Every attempt used `scrollToItem` / `animateScrollToItem`. These all fail because:
+1. Scroll-before-reorder: LazyList anchor-key behavior reverts the scroll when the reorder fires
+2. Reorder-before-scroll: same anchor-key reversion in the next recomposition
+3. `LaunchedEffect(neighborScrollTarget)` gets cancelled when `onDrag` updates state mid-operation
+
+**Why anchor-key behavior is actually helpful here:**
+After `onReorderGroup(target, newIndex)` where target > dragged (right-peek case):
+- B was anchor at fvi=dragged; B is now at index `target` → fvi automatically adjusts to `target`
+- C was at right-peek (index target); C is now at left-peek (index newIndex = target-1)
+- D was off-screen; D is now at right-peek (index target+1) — enters composition automatically
+- This is EXACTLY the desired final state. No programmatic scroll needed.
+
+**What we need to animate:** C jumps from right-peek to left-peek (2 slots left) instantly due to list reorder. We pre-apply a `+2*slotPx` translationX offset to C BEFORE the reorder, so in the frame where the reorder renders, C appears to still be at right-peek. Then animate the offset back to 0 → C slides smoothly from right-peek to left-peek.
+
+**New state vars added:**
+```kotlin
+val hoverJobRef      = remember { object { var job: Job? = null } }
+var hoverCommitted   by remember { mutableStateOf(false) }
+val hoverCOffsetAnim = remember { Animatable(0f) }
+var hoverCGroupId    by remember { mutableStateOf<String?>(null) }
+```
+
+**Key design decisions:**
+- `scope.launch` job (not `LaunchedEffect`) — survives `dragInfo` state changes that happen on every `onDrag` call
+- `hoverCommitted` flag — while true, `onDrag`'s `neighborScroll != cur.neighborScrollTarget` check does NOT cancel/restart the job (prevents mid-animation cancellation when user's finger moves slightly)
+- `dAfterInsert = capturedTarget` (always) — B ends up at the slot C vacated. For right-peek: dragged+1=target. For left-peek: dragged-1=target. Both simplify to `capturedTarget`.
+- `initialOffset = sign * 2f * slotPx` — C jumps 2 slot widths; left-peek→right-peek uses negative sign
+- `withFrameNanos {}` twice after reorder to let layout settle before animating
+- `finally` block resets `hoverCommitted`, `hoverCGroupId`, snaps offset to 0 — no stuck state on cancellation
+
+**Watch out for (future instances):**
+- Do NOT call `animateScrollToItem` or `scrollToItem` in the hover job — anchor-key handles fvi automatically
+- `hoverCOffsetAnim` value is added to `translationX` only when `group.id == hoverCGroupId && !isDragged`
+- The `finally` block is critical — if the job is cancelled mid-animation (drag ended), offsets must reset
+- `dragInfo.groupIndex` updated to `capturedTarget` immediately after reorder (before `withFrameNanos`) so `onDrag` hit-test uses correct index
+- `hoverCommitted` must be set to `true` BEFORE `onReorderGroup` is called — avoids the window where `onDrag` could cancel the job between reorder and `withFrameNanos`
+
+**Build:** deck-v280-debug.apk. Install from `app/build/outputs/apk/debug/app-debug.apk`.
+
+---
+
+### Instance A — 2026-05-27 (A/D animations — v281)
+
+**User feedback on v280:** D entered instantly (no animation). A also didn't animate.
+
+**Fix:**
+- Added `hoverAOffsetAnim` (exit card) and `hoverDOffsetAnim` (enter card) alongside `hoverCOffsetAnim`
+- Added `beyondBoundsItemCount = if (hoverCommitted) 2 else 0` to LazyRow — keeps A in composition even when it's 2 slots off-screen after anchor-key fvi adjustment
+- All three animations use `sign * N * slotPx` formula (sign = +1 right-drag, -1 left-drag):
+  - C: snapTo(sign * 2 * slotPx) → animateTo(0) — cancels 2-slot layout jump
+  - A (exit): snapTo(sign * slotPx) → animateTo(0) — cancels 1-slot jump, then slides off
+  - D (enter): snapTo(sign * slotPx) → animateTo(0, delay=150ms) — starts off-screen, enters after C starts moving
+- Used `coroutineScope { launch {...}; launch {...}; launch {...} }` so all 3 run concurrently and the outer coroutine waits for all to finish before finally-block cleanup
+- "A" = the card that was on the opposite side from the target (exits off-screen); "D" = the card that was off-screen just beyond the target (enters as new peek)
+
+**Why `beyondBoundsItemCount` is needed:**
+After anchor-key fvi adjustment, A is at index fvi-2 (2 slots off-screen). Without `beyondBoundsItemCount = 2`, LazyRow unmounts A based on layout position even though we want to animate its translationX. Setting beyondBoundsItemCount = 2 keeps 2 extra items composed on each side of the visible area — A stays in composition for the duration of the animation.
+
+**Watch out for:**
+- `beyondBoundsItemCount` only set to 2 when `hoverCommitted = true` — reset to 0 after animation to avoid unnecessary composition overhead
+- All three GroupIds cleared in finally block before snapTo calls, so the offsets stop being applied even if snapTo fails (CancellationException during coroutine cancel)
+- The `delay(150L)` for D creates the visual "gap" the user wanted — C starts sliding first, D follows
+
+**Build:** deck-v281-debug.apk. User feedback: "That's good for now. It's the best yet." Animation is functional; minor tweaks may follow later.
+
+---
+
+### Instance A — 2026-05-27 (Alphabet fix + gradient — v285)
+
+**User request:** Fix alphabet letters getting cut off around M on small screens (Ikko Mind One Pro). Add bottom gradient fade similar to app list.
+
+**Root cause:** `Column(Arrangement.SpaceEvenly)` clips when 26 letters × minimum text height > available height. Touch still works (pointerInput reads full `size.height`) but letters M–Z disappear visually.
+
+**Fix in `AlphabetSlider` (AppDrawer.kt):**
+- Replaced `Column(Arrangement.SpaceEvenly)` with `BoxWithConstraints` using proportional absolute positioning
+- Each letter positioned at `offset { IntOffset(0, itemHeightPx * i) }` where `itemHeightPx = constraints.maxHeight / letters.size`
+- Added `lineHeight = 9.sp` to keep each letter's measured height equal to fontSize
+- Added `height(itemHeightPx.toDp())` + `wrapContentHeight(CenterVertically)` so each slot is exactly its share of the available height
+- Added gradient `Box` overlay (Transparent to `surfaceContainerHigh`, 48dp tall) via `align(Alignment.BottomCenter)` in the outer Box scope
+
+**Build:** deck-v285-debug.apk.
+
+
+---
+
+### Instance A - 2026-05-27 (Alphabet squish fix + Uninstall Z-order fix + Grouped search results + Search provider settings - v286-v290)
+
+**Alphabet squish on drawer close (v286):**
+- Root cause: BoxWithConstraints constraints.maxHeight shrinks during close animation, recomputing itemHeightPx each frame -> letters compress
+- Fix: capturedHeightPx tracks max height ever seen; only increases, never decreases
+- Added clipToBounds() to hide letters that overflow during animated height reduction
+- Result: layout dimensions frozen at full-open height; letters stay stable during close
+
+**Uninstall Z-order fix (v286):**
+- Root cause: CardActions was composed/drawn BEFORE card content Box in GesturableCard -> lower Z-order -> lower hit-test priority in Compose
+- Fix: moved CardActions to be drawn LAST (after card content Box) so it wins touch event competition
+- Modifier.offset moves both visual position AND hit-test bounds for the card content
+
+**Grouped search results (v288):**
+- Added groupResults() (LinkedHashMap preserves insertion order) and ResultGroup() composable in LauncherSearchBar.kt as internal functions
+- ResultGroup wraps each provider's results in a surfaceContainerHighest Surface card with a label header and HorizontalDividers between rows
+- Both LauncherSearchBar.kt and LauncherSheet.kt use remember(results) { groupResults(results) } + item(key) in LazyColumns
+
+**Search provider settings (v288-v290):**
+- SearchViewModel.kt: reads disabled_static_providers StringSet from SharedPreferences at query time (not at creation) - effect is immediate on next search without restart
+- Static providers filtered: enabledStatic = staticProviders.filter { it.id !in disabledStatic }
+- SettingsScreen.kt: added disabledStaticProviders state + SectionHeader("Search") section with Switches for Apps/Contacts/Calculator/Gemini before plugin rows
+- Static provider IDs: "apps", "contacts", "calculator", "ai"
+
+**Build:** deck-v290-debug.apk.
+
+---
+
+### Instance A - 2026-05-27 (Dialer provider + visible apps toggle - v290-v296)
+
+**Dialer search provider (v290-v295):**
+- New SearchResult.DialerResult(phoneNumber, displayText) added to sealed class
+- New DialerProvider.kt: reads "number_key_map" pref (10 chars, keys for digits 1-9 then 0); converts query letters to digits via map; returns DialerResult if >=3 digits and no unmapped letters (so it never fires on normal text searches)
+- Added to SearchViewModel factory staticProviders list (after CalculatorProvider)
+- LauncherSearchBar.kt: DialerResultCard composable (Phone icon, opens ACTION_DIAL intent), groupResults key "Phone", resultKey "dialer:...", onSearch handler
+- LauncherSheet.kt: resultKey exhaustive when - added DialerResult branch
+- SettingsScreen.kt: "Dialer"/"dialer"/true added to static providers toggle list; "Number key layout" ListItem with Configure button; 10-step AlertDialog that captures physical key presses via onKeyEvent on a focused Box (nativeKeyEvent.getUnicodeChar(0)) and saves to "number_key_map" pref
+
+**Visible apps toggle for app search (v295-v296):**
+- AppSearchProvider.kt: reads "app_search_visible_only" pref (default true); only applies hiddenPackages() filter when true
+- SettingsScreen.kt: "Visible apps only" sub-toggle (indented, greyed when Apps provider disabled) after the static providers forEach block; saves to "app_search_visible_only" pref
+
+**Build:** deck-v296-debug.apk.
+
+---
+
+### Instance A - 2026-05-27 (Live widget search results + widget manager - v296-v298)
+
+**Live widgets in search results:**
+- WidgetSearchProvider wired into SearchViewModel staticProviders (was omitted)
+- SearchResultRow WidgetPickerResult branch enabled (was /* disabled for now */) - now calls WidgetPickerCard(result, retryKey)
+- LiveWidgetCard already existed with full binding logic: allocates appWidgetId, tries bindAppWidgetIdIfAllowed, launches ACTION_APPWIDGET_BIND dialog if denied, retries on resumeCount change (lifecycle observer), falls back to StaticWidgetPreview
+- widgetIdCache (file-level HashMap) persists component->widgetId across recompositions within session
+- "Widgets" added to SettingsScreen static providers toggle list
+
+**Widget manager sheet:**
+- WidgetPinRepository.getAllPinnedWidgets() added: scans prefs for pinned_widget_* keys
+- ResultGroup gained optional onManage parameter; when set, renders a "Manage all widgets" footer row
+- DockedSearchBar (LauncherSearchBar.kt) and LauncherSheet.kt both pass onManage for the Widgets group, opening WidgetManagerSheet
+- WidgetManagerSheet (internal): ModalBottomSheet listing all pinned widgets rendered live with LiveWidgetCard, with Change and Remove per-widget actions
+- WidgetPickerDialog (private): AlertDialog with RadioButton list of available widget providers for a package, saves via WidgetPinRepository.pinWidget
+
+**Build:** deck-v298-debug.apk.
+
+---
+
+### Instance A — 2026-05-28 (wallpaper blur + dim animate-to-zero — v344)
+
+**Done:**
+
+1. **Wallpaper blur slider** (`WallpaperBackground.kt`, `SettingsScreen.kt`, `HomeScreen.kt`)
+   - `WallpaperBackground`: added `blurFraction: Float = 0f` parameter; applies `BlurEffect(radius, radius, TileMode.Decal)` via `graphicsLayer { renderEffect = ... }` (API 31+ guard). `MAX_BLUR_RADIUS = 40f`. Removed old software-blur overlay approach.
+   - `SettingsScreen`: added Wallpaper blur `Slider` (0–100%) writing `wallpaper_blur` pref, placed before existing Wallpaper dim slider.
+   - `HomeScreen`: reads `wallpaper_blur` pref + animates via `animateFloatAsState(targetValue = if (hasCards) blurTarget else 0f, tween(600))`. Passes `blurFraction` to `WallpaperBackground`.
+
+2. **Wallpaper dim animate-to-zero when no cards** (`HomeScreen.kt`)
+   - Added `val effectiveDim by animateFloatAsState(targetValue = if (hasCards) dimAmount else 0f, tween(600))`.
+   - Dim overlay Box now uses `effectiveDim` instead of `dimAmount`.
+   - Both blur and dim smoothly animate to zero when the card row is empty, and return to the user's chosen values when cards are present.
+
+**Build:** deck-v344-debug.apk. Installed successfully.
+
+---
+
+### Instance A — 2026-05-28 (dismiss removes from system recents + navigation mode toggle — v345, v346)
+
+**Done:**
+
+1. **Dismiss removes task from Android recents** (`LivePreviewRepository.kt`, `HomeViewModel.kt`)
+   - Added `removeTask(packageName: String)` to `LivePreviewRepository`: parses `dumpsys activity recents` for the taskId, then runs `am task remove <taskId>` via root. No-op if root unavailable or task not found.
+   - `HomeViewModel.dismissGroup()`: launches a coroutine calling `livePreviewRepo.removeTask()` for each dismissed app.
+   - `HomeViewModel.removeFromExpandedStack()`: same.
+
+2. **"Disable Android recents gesture" toggle** (`SettingsScreen.kt` — `CardsSettingsScreen`)
+   - New Switch in Cards & Drawer settings.
+   - When enabled: `settings put secure navigation_mode 0` via root → 3-button nav (no recents gesture).
+   - When disabled: `settings put secure navigation_mode 2` via root → gesture nav restored.
+   - Persisted in `deck_prefs/"disable_recents_gesture"`.
+   - Added `import kotlinx.coroutines.launch` to SettingsScreen.kt.
+
+**Build:** deck-v346-debug.apk. Installed successfully.
+
+---
+
+### Instance A — 2026-05-28 (blur fix + dismiss force-stop — v347)
+
+**Done:**
+
+1. **Wallpaper blur fix** (`WallpaperBackground.kt`)
+   - **Root cause**: `graphicsLayer { renderEffect = BlurEffect(...) }` without `compositingStrategy = CompositingStrategy.Offscreen` is silently ignored by the Compose renderer when no other compositing reason exists. The renderer optimizes away the layer and never applies the RenderEffect.
+   - **Fix**: Replaced with `Modifier.blur(blurRadius)` from `androidx.compose.ui.draw`. This API internally sets `compositingStrategy = CompositingStrategy.Offscreen` before applying the RenderEffect, guaranteeing the offscreen hardware pass. This is exactly how the drawer background blur works (`WallpaperBackground(Modifier.fillMaxSize().blur(24.dp))`).
+   - `MAX_BLUR_DP = 25f` (dp, not pixels). At full slider: 25dp = ~66px blur radius on Pixel 9 Pro.
+   - Removed imports: `BlurEffect`, `TileMode`, `graphicsLayer` (ui.graphics), `RequiresApi`, `Build`.
+   - Added imports: `androidx.compose.ui.draw.blur`, `androidx.compose.ui.unit.dp`.
+
+2. **Dismiss force-stops the app** (`LivePreviewRepository.kt`)
+   - **Root cause**: `killBackgroundProcesses()` only kills processes already in background state. `am task remove <taskId>` removes the recents entry but doesn't always finish the activity. Neither was reliably closing the app.
+   - **Fix**: `removeTask()` now runs `am force-stop <packageName>` first (finishes all activities + kills all processes, no taskId needed), then `am task remove <taskId>` for the recents cleanup.
+   - `repo.killApp()` (killBackgroundProcesses) retained as fallback for non-rooted case.
+
+**Build:** deck-v347-debug.apk. Installed successfully.
+
+---
+
+### Instance A — 2026-05-28 (dismiss fix + wallpaper blur fix — v348–v352)
+
+**Done:**
+
+1. **Dismiss now removes from Android recents** (`LivePreviewRepository.kt`)
+   - Root cause: `am task remove` does not exist on Android 15 (API 35). The correct command is `am stack remove <taskId>`.
+   - Fixed in v350: changed `am task remove $taskId` → `am stack remove $taskId` in `removeTask()`.
+   - Also reverted a broken v349 parser (ActivityRecord-primary approach caused stopped apps with `Activities=[]` to be missed). Restored the simple `taskId=(\d+)` + `mActivityComponent=([^/\n]+)/` block parser — confirmed working from live `dumpsys activity recents` dump.
+
+2. **Wallpaper blur working** (`WallpaperBackground.kt`, `HomeScreen.kt`, `res/values/themes.xml`)
+   - **Root cause**: ALL graphicsLayer-based approaches (Modifier.blur, graphicsLayer { renderEffect }, Modifier.alpha) are silently ignored in the launcher window context. This is a compositor-level constraint; Compose rendering within this window type does not apply layer effects.
+   - **Fix (v352)**: Use `Window.setBackgroundBlurRadius()` (API 31+) — the system compositor applies the blur to the wallpaper layer behind the window.
+   - `themes.xml`: added `windowIsTranslucent=true` (required for `setBackgroundBlurRadius` to render).
+   - `HomeScreen.kt`: added `SideEffect { activity?.window?.setBackgroundBlurRadius((blurFraction * 80f).toInt()) }` — fires after every recomposition so the animated value drives the blur radius each frame.
+   - `HomeScreen.kt`: removed `WallpaperBackground(blurFraction = ...)` call — it was redundantly drawing a copy of the wallpaper on top of the system wallpaper already showing through the transparent window (`FLAG_SHOW_WALLPAPER` was already set in MainActivity, `windowBackground=transparent` and `windowShowWallpaper=true` were already in the theme).
+   - `WallpaperBackground.kt`: kept in place but no longer called from HomeScreen.
+
+**Build:** deck-v352-debug.apk. Installed and confirmed working.
+
+### Instance A — 2026-05-28 (cleanup + optimization pass)
+
+**Done:**
+- Task 1 (deleted dead files): Deleted ui/home/WallpaperBackground.kt and data/WallpaperCache.kt. Confirmed neither imported anywhere.
+- Task 2 (AppWidgetHost leak): In AppDrawer.kt WidgetPickerDialog, added startListening() to the remember block and a DisposableEffect to call stopListening() on dispose.
+- Task 3 (shared icon composable): Created ui/common/AppIconBitmap.kt with rememberAppIconBitmap(key, drawable, iconShape, size). Replaced produceState icon blocks in AppDrawer.kt (AppGridItem size=192, AppListItem size=128), LauncherSheet.kt (SheetAppGridItem size=192, SheetAppListItem size=128), LauncherSearchBar.kt (AppResultCard size=128). Removed now-unused toArgb import from LauncherSheet.kt.
+- Task 4 (rememberUpdatedState): In HomeScreen.kt, wrapped vm in rememberUpdatedState(vm) so LifecycleEventObserver always captures the latest vm.
+- Task 5 (!! operator): In DrawerViewModel.kt, replaced prefs.getString("hidden_apps", "")!! with safe ?: "" fallback.
+- Task 6 (unused method): Removed hasUsageStatsPermission() from MainActivity.kt plus AppOpsManager and Process imports (confirmed unused via grep).
+- Task 7 (IconPackRepository guard): Added if (!inner.contains("/")) continue in loadMappings() after stripping ComponentInfo{} wrapper.
+- Task 8 (unchecked cast): In WidgetPinRepository.getAllPinnedWidgets(), changed value as String to value as? String ?: "" with .filter { (_, v) -> v.isNotEmpty() }.
+- Build: assembleDebug — BUILD SUCCESSFUL in 32s. Only pre-existing deprecation warnings, no new errors.
+
+**Watch out for:**
+- rememberAppIconBitmap in ui/common/AppIconBitmap.kt calls MaterialTheme.colorScheme — must be inside a themed Composable tree.
+- AppGridItem in AppDrawer.kt (not LauncherSheet.kt) has no iconShape support; it now uses rememberAppIconBitmap with IconShape.NONE default.
+
+---
+
+### Instance A - 2026-05-29 (reinstall fix + browser flash fixes)
+
+**Done:**
+
+1. **HomeScreen ON_RESUME now calls refresh()** (HomeScreen.kt)
+   - Added refresh() alongside refreshPreviews() in the LifecycleEventObserver ON_RESUME handler. Ensures stale cards are cleared immediately when Deck resumes, instead of waiting up to 30s for the periodic timer.
+
+2. **HomeViewModel merge fix: no stale task IDs after reinstall** (HomeViewModel.kt)
+   - filteredByPkg fallback changed: only preserves old taskId when taskMap.isEmpty() (root unavailable). When root returned data but the task is absent, use taskId=-1 (fall back to intent launch). Prevents dead task IDs persisting after app reinstall.
+
+3. **Browser back gesture: snapshot animates off-screen before clearing** (BrowserTabActivity.kt, BrowserScreen.kt)
+   - handleOnBackPressed animates backAnimProgress from current position to 2.0f over 180ms (AccelerateInterpolator), then clears backSnapshotBitmap. This slides the snapshot off-screen rather than popping it.
+   - BrowserScreen snapshot overlay: backProgress > 1.0 triggers exit translation (600dp per exit unit) so bitmap is fully off-screen at backProgress=2. Gesture feel (0-1) unchanged.
+   - backCommitAnimator field cancels in-flight commit if new gesture starts.
+
+4. **Browser new tab flash: initial load overlay** (BrowserScreen.kt, BrowserTabActivity.kt)
+   - BrowserScreen shows solid colorScheme.background overlay when currentUrl.value.isEmpty(). Clears when onPageStarted fires.
+   - BrowserTabActivity defers loadUrl/restoreState to root.post {} so WebViewClient (set in Compose DisposableEffect) is installed before onPageStarted can fire.
+
+---
+
+### Instance A — 2026-05-29 (preview system overhaul, v423–v425)
+
+**Done:**
+- Fixed "all browser tabs same preview": removed storage under package-level key when `currentFocusedTaskId == -1` in the 4s fallback (ScreenshotAccessibilityService). Prevents stale package-level entry making all browser tabs fall back to the same screenshot.
+- Fixed "cards I can't open": HomeScreen `onGroupTap` now uses `startActivity()` for all non-browser apps instead of `moveTaskToFront()`. `moveTaskToFront()` silently fails on stale taskIds; `startActivity()` relaunches if needed.
+- Fixed `dismissGroup` + `removeFromExpandedStack` killing ALL browser tabs: both now check `isBrowserTab = pkg == BROWSER_PACKAGE && taskId != -1` and skip `killApp` / `livePreviewRepo.removeTask` for browser tabs. Without this, dismissing any browser-tab card would `force-stop` the entire browser.
+- Added 300ms retry in `pageLoaded` collector: if `ACTION_TAB_FOCUSED` hasn't arrived before `ACTION_PAGE_LOADED` (broadcast ordering delay), we re-check `currentFocusedTaskId` after 300ms before skipping.
+- Wrapped `handler.remove + handler.postDelayed` in `handler.post {}` in pageLoaded collector for atomic main-thread execution (prevents onAccessibilityEvent cancelling the scheduled capture between the two calls from IO thread).
+- Added `Log.d` in `onAccessibilityEvent` browser branch to diagnose whether `TYPE_WINDOW_STATE_CHANGED` fires for same-package tab switches (key unknown: if it doesn't fire, the 4s fallback never runs for tabs 2+).
+
+**Watch out for:**
+- `BrowserTabReceiver.BROWSER_PACKAGE` is now referenced in HomeScreen.kt and HomeViewModel.kt — if the browser package name changes, update the constant there.
+- The 300ms retry in `pageLoaded` is a coroutine delay on the IO dispatcher — it's cheap but means two collector invocations overlap briefly if events come rapidly.
+- `dismissGroup` still removes the card from Deck's list even for browser tabs — it just skips force-stopping the browser. The browser tab remains open; only the Deck card disappears.
+
+**Build:** Deck deck-v393-debug.apk installed. Browser app-debug.apk installed.
+
+---
+
+### Instance A — 2026-05-29 (codebase cleanup + preview diagnostics, v426)
+
+**Done:**
+
+1. **ScreenshotCache cleanup** (`data/ScreenshotCache.kt`)
+   - `MAX_ENTRIES` 12 → 20 (browser tabs need more slots).
+   - All method parameters renamed from `packageName` to `key` — the cache now stores `"com.hermes.browser:824"` style keys for browser tabs; the old name was misleading.
+   - `_revision.value++` → `_revision.update { it + 1 }` (atomic CAS update, not a read-modify-write race).
+   - Added `import kotlinx.coroutines.flow.update`.
+
+2. **NotificationStore simplification** (`service/NotificationStore.kt`, `service/DeckNotificationService.kt`)
+   - Removed dead `Entry(title, text)` data class and `LinkedHashMap<String, Entry>` storage. Only the package name matters for badge display.
+   - Replaced with `LinkedHashSet<String>`. `post()` signature simplified to `post(packageName: String)` only.
+   - `DeckNotificationService.onNotificationPosted` no longer extracts title/text (nothing reads them).
+
+3. **LivePreviewRepository** (`data/LivePreviewRepository.kt`)
+   - `getLiveTaskPackages()` simplified from a full `withContext(Dispatchers.IO)` block to a one-liner delegate to `getLiveTasks()`.
+
+4. **ForegroundEventBus** (`service/ForegroundEventBus.kt`)
+   - Removed trailing blank line inside object body (style).
+
+5. **MainActivity** (`MainActivity.kt`)
+   - Fixed onboarding ordering bug: `startActivity(OnboardingActivity)` now comes before `prefs.edit().putBoolean("onboarding_done", true).apply()`. Previously, if the activity launch failed, onboarding was marked done and would never show again.
+   - Removed duplicate `isAccessibilityEnabled()` method (was already removed in prior pass but a second copy remained).
+
+6. **HomeScreen launch intent** (`ui/home/HomeScreen.kt`)
+   - Added `FLAG_ACTIVITY_RESET_TASK_IF_NEEDED` to the `startActivity` launch intent for non-browser apps. This ensures an existing task is properly brought to the front (not re-launched fresh) when the user returns to an already-running app.
+
+7. **IconPackRepository** (`data/IconPackRepository.kt`)
+   - `getDrawable(resId, null)` → `getDrawable(resId, packCtx.theme)` (avoids deprecated API warning).
+
+**Build:** assembleDebug — BUILD SUCCESSFUL. Installed as `deck-v426-debug.apk`.
+
+**Watch out for:**
+- `ScreenshotCache` parameter is now named `key` everywhere — if adding new callers, use the full cache key (`"$pkg:$taskId"` for browser tabs, `packageName` for all other apps).
+- `NotificationStore.post()` now takes only `packageName` — any caller passing title/text will fail to compile.
+
+---
+
+### Instance D — 2026-05-29 (Browser: address bar tap + panel drag fixes)
+
+**Done (`Browser/app/src/main/kotlin/com/hermes/browser/ui/BrowserScreen.kt`):**
+
+1. **Fixed address bar tap not working / keyboard never showing** — root cause: the drag handle Box used `Modifier.draggable(enabled = !isPanelOpen)`. `Modifier.draggable` consumes pointer events during slop detection, blocking taps from reaching the `BasicTextField`. Replaced with a custom `Modifier.pointerInput` that only consumes events after `abs(cumDelta) > 8dp` threshold. Taps now pass through to the address bar normally.
+
+2. **Fixed horizontal expand animation gone** — same root cause as above: `isFocused` was never set to `true` because taps never reached `NavBarRow.BasicTextField.onFocusChanged`. Now that taps pass through, `isFocused = true` fires correctly, `horizontalPad` animates from 24dp → 12dp (matching Deck's `pillHPad` animation).
+
+3. **Fixed can't close expanded panel by dragging** — the drag handle was `enabled = !isPanelOpen`, so when the panel was open there was no gesture handler for closing. Added a 20dp drag strip at the top of the expanded panel (above `BrowserPanel`) with a visual 32×4dp pill indicator. Dragging the strip down (past 8dp slop) closes the panel; downward fling (`velocity > 800f`) also closes even if not past midpoint.
+
+**Removed:** `panelDragState` (`rememberDraggableState`), imports for `draggable`/`rememberDraggableState`/`Orientation`.
+**Added imports:** `awaitEachGesture`, `awaitFirstDown`, `pointerInput`, `VelocityTracker`, `addPointerInputChange`.
+
+**Watch out for:**
+- The panel drag strip uses `pointerInput(Unit)` (stable key) — it never restarts mid-gesture. Access to `liveDragOffsetState`, `heightAnim`, `pillHeightPxState`, `maxExpandedHState` is via closure capture; the `rememberUpdatedState` wrappers ensure current values are used.
+- Both the drag handle and the drag strip use the same snap-to-open/close logic. The strip uses `velocity > 800f` for downward fling (close), while the handle uses `velocity < -800f` for upward fling (open).
+
+---
+
+### Instance D — 2026-05-29 (Browser: gesture + style overhaul + favicon row)
+
+**Done (`Browser/app/src/main/kotlin/com/hermes/browser/ui/BrowserScreen.kt`):**
+
+1. **All overlay Boxes removed** — removed the `fillMaxSize` drag handle overlay and the panel Box's `pointerInput`. These were the root cause of: address bar not focusable, panel closing 2× as fast (double-counting with `nestedScrollConnection`), and visible handle pill.
+
+2. **Open gesture on nav bar Box directly** — added `pointerInput(Unit)` to the nav bar Box modifier chain. Only tracks upward drags (`cumDelta < -slopPx`). Since the nav bar Box is an ancestor of `BasicTextField`, in Compose's `Main` pass `BasicTextField` fires first and gets taps; our handler only activates on clear upward drags.
+
+3. **Direction reversal fixed** — `nestedScrollConnection.onPreScroll` now handles `partiallyClosing && available.y < 0`: when user reverses upward mid-close, the panel re-opens before the list can scroll. Added `source == NestedScrollSource.Drag` guard.
+
+4. **`onPreFling` return value fixed** — returns `Velocity.Zero` for the re-open case (doesn't steal the upward fling from the list), returns `available` only when closing.
+
+5. **BrowserPanel styled to match Deck** — replaced vertical bookmarks list with a `LazyRow` favicon strip (`BookmarkFaviconItem` composable). Favicons fetched async via Google's favicon service (`https://www.google.com/s2/favicons?domain=...&sz=64`). Fallback: circle with first letter of domain. History list remains below. 40dp top/bottom `contentPadding` + gradient fade overlays matching Deck's drawer.
+
+**Added imports:** `LazyRow`, `CircleShape`, `BitmapFactory`, `produceState`, `Brush`.
+
+**Watch out for:**
+- Favicon fetch uses `HttpURLConnection` with 3s timeouts. On slow connections the initial letter fallback shows until image loads.
+- `LazyRow` inside a `LazyColumn` item — the LazyRow's scroll doesn't conflict with the LazyColumn because they're in perpendicular directions.
+- `nestedScrollConnection` only closes when list is at top (`atTop` check). If list is scrolled, user must scroll to top first to overscroll-close. The 40dp top contentPadding creates a reliable drag zone at the top.
+
+---
+
+### Instance D — 2026-05-29 (Deck v430: widget configure Activity)
+
+**Done (`ui/drawer/AppDrawer.kt`):**
+
+Widgets with a `configure` Activity (e.g. Inoreader, many news/feed widgets) were never showing that Activity after binding. The result: the widget was added but never configured, so it showed the app's default/homepage content.
+
+Fixed in two code paths inside `WidgetPickerDialog`:
+1. **Silent-bind path** (`bindAppWidgetIdIfAllowed` returns `true`): now calls `getAppWidgetInfo(newId)?.configure?.let { ... startActivity(ACTION_APPWIDGET_CONFIGURE ...) }` before sending `ACTION_APPWIDGET_UPDATE`.
+2. **System-dialog-bind path** (`bindLauncher` result callback): same configure launch added before the `ACTION_APPWIDGET_UPDATE` broadcast.
+
+Both paths use `FLAG_ACTIVITY_NEW_TASK` and `runCatching` so a missing configure Activity never crashes.
+
+**Watch out for:**
+- The configure Activity is launched with `FLAG_ACTIVITY_NEW_TASK` (not via `startActivityForResult`). If the user cancels configure, the widget stays pinned but unconfigured — tapping it again from search results won't re-launch configure. A future improvement: track configure state and re-launch if needed.
+- First-time app setup (login) must be completed BEFORE widget configuration. If the user hasn't opened Inoreader yet, the configure Activity will show the login screen (expected). Tell users: open the app from the drawer first, then configure the widget.
+
+---
+
+### Instance D — 2026-05-29 (Deck v433: widget configure — Settings path + update ordering)
+
+**Done (`ui/search/LauncherSearchBar.kt`, `ui/drawer/AppDrawer.kt`):**
+
+Two follow-up bugs from the v430 configure fix:
+1. **Settings-path `WidgetPickerDialog`** (the second one, in `LauncherSearchBar.kt` — used from Widget Settings "Swap Widget") never launched the configure Activity at all. Added the same `info.configure` launch to both its silent-bind branch and its `bindLauncher` result callback.
+2. **Update-before-configure ordering** (`AppDrawer.kt` + `LauncherSearchBar.kt`): `ACTION_APPWIDGET_UPDATE` was being broadcast even for widgets that have a configure Activity. That fires the provider's `onUpdate()` with an unconfigured widget (Inoreader writes empty content). Now `ACTION_APPWIDGET_UPDATE` is sent **only** when `info.configure == null`; widgets with a configure Activity are expected to call `updateAppWidget()` themselves on save.
+
+**Watch out for:**
+- `Intent(...).apply { component = x }` fails to compile when an outer `val component` is in scope — use `this.component = x`. Hit this in the Settings-path silent-bind branch.
+
+---
+
+### Instance D — 2026-05-29 (Deck v434: browser tabs all showing same preview)
+
+**Root cause (confirmed via `dumpsys activity recents` + logcat, not guessed):**
+Browser tabs use `excludeFromRecents="true"`, which moves all but the *foreground* tab into `mHiddenTasks`. `LivePreviewRepository.parseRecentTasks()` only parses `* Recent #N:` blocks, so it sees exactly **one** browser task. `refreshAll()`'s `multiTaskPkgs` heuristic (`> 1 task ⇒ per-task key`) therefore classified the browser as single-task and stored its snapshot under the **bare** `com.hermes.browser` key (logcat: `Loaded snapshot for com.hermes.browser`). Then `AppCard`'s `?: ScreenshotCache.get(app.packageName)` fallback made **every** browser tab card resolve to that one bare snapshot → all identical.
+
+**Fix (two sides of one bug):**
+1. **Write side** (`LivePreviewRepository.refreshAll`): force the per-task key for the browser package regardless of the multiTaskPkgs count — `pkg in multiTaskPkgs || pkg == BROWSER_PACKAGE`. Imported `BrowserTabReceiver.Companion.BROWSER_PACKAGE`.
+2. ~~**Read side** (`AppCard`): removed the `?: ScreenshotCache.get(app.packageName)` fallback.~~ **REVERTED in v435 — this was wrong.** See v435 entry below.
+
+**Result:** the foreground browser tab gets its snapshot under `com.hermes.browser:$taskId`; other tabs show their icon until live-captured (correct) rather than a wrong shared image.
+
+---
+
+### Instance D — 2026-05-29 (Deck v435: restore AppCard fallback — native apps lost previews)
+
+**Regression from v434:** removing `AppCard`'s `?: ScreenshotCache.get(app.packageName)` fallback made **native apps** show only their icon. The v434 reasoning ("single-task apps have `app.id == packageName`") was wrong: `HomeViewModel` resolves a real `taskId` for single-instance apps too (so `moveTaskToFront` works), so their card id is `pkg:taskId`. But the screenshot service captures by **bare package name**, so native cards depend on the package-key fallback to find their shot.
+
+**Fix:** restored the fallback in `AppCard`. It is now safe for the browser because the **write-side fix (v434) means the bare `com.hermes.browser` key is never written by anything** — service paths and refreshAll all use per-task keys for the browser. So:
+- Native app: `get("pkg:taskId")` miss → `get("pkg")` hit (service/refreshAll bare key). ✓
+- Browser tab w/ capture: `get("com.hermes.browser:taskId")` hit. ✓
+- Browser tab w/o capture: miss → `get("com.hermes.browser")` → null (never written) → icon. ✓
+
+**The actual browser fix lives entirely in the write side** (`LivePreviewRepository` forcing per-task keys for the browser). The AppCard fallback should NOT be removed.
+
+**Watch out for:**
+- Latent (pre-existing) edge case: a non-browser multi-task app (e.g. Gmail with multiple windows) where only one task is visible in `* Recent #N` will still store a bare `pkg` key and both cards fall back to it (shared preview). Not browser-related; not addressed. The browser is special-cased because `excludeFromRecents` reliably hides its extra tabs.
+
+---
+
+### Instance D — 2026-05-29 (Browser: tabs self-destruct on backgrounding → can't reopen)
+
+**Root cause (confirmed empirically via dumpsys):** `BrowserTabActivity` has `documentLaunchMode="always"`. Per Android, **`android:autoRemoveFromRecents` defaults to `true` for document-launch activities** — so each tab's task is automatically removed the moment the user navigates away (goes Home). Verified: opened 2 fresh tabs (#910, #911, both `sz=1`), pressed Home → WindowManager logged `Task vanished taskId=910/911` and both were **gone** from dumpsys. When the user then taps the Deck card, `moveTaskToFront(taskId)` targets a task that no longer exists → nothing happens.
+
+**Fix:** added `android:autoRemoveFromRecents="false"` to `BrowserTabActivity` in `Browser/app/src/main/AndroidManifest.xml`.
+
+**Verified after fix:** opened 2 fresh tabs (#914, #915) → pressed Home → both **survived as `sz=1` live tasks** → tapped the Deck card → `topResumedActivity=com.hermes.browser/.BrowserTabActivity t915` (browser tab came to foreground). Reopen works end-to-end.
+
+**Watch out for / follow-ups:**
+- With `autoRemoveFromRecents="false"`, tab tasks now persist until explicitly removed. Deck's card *dismiss* for browser tabs currently SKIPS `removeTask` (it would `force-stop` the whole shared-process browser). So dismissed tabs leave orphaned tasks that accumulate over time (we observed ~123 `sz=0` shells this session — partly reinstall cruft, partly this). Follow-up: dismiss should remove the *specific* tab's task — e.g. Deck broadcasts a "close task N" to the browser, which calls `finishAndRemoveTask()` on its own matching `AppTask`. Not done here (kept the fix minimal).
+- **Still open:** the user also reported *duplicate* browser cards on returning home. Separate Deck-side issue (suspected `refresh()`-vs-broadcast race in `HomeViewModel`); needs its own faithful repro. The `DeckTap` debug logging added to `HomeScreen.kt` (v436) is still in place to help diagnose it — remove once duplicates are resolved.
+
+---
+
+### Instance D — 2026-05-29 (Deck v437: new cards land right of the app you came from)
+
+**User request:** "Apart from when a stack is formed, always put new tabs/apps to the right of the last used app." Confirmed meaning: right of the app that was foregrounded just before (the parent you launched from), anchored to actual usage — not the pager's last scroll position.
+
+**Done (`HomeViewModel.kt`):**
+- Added `private var lastUsedPackage: String?` — tracked in the `ForegroundEventBus` collector (set to the current foreground pkg on every real foreground event, captured as `anchorPkg` *before* overwrite so a new app anchors to the previous one).
+- Added `insertIndexAfter(anchorPkg, groups)` helper → index right of `anchorPkg`'s card, else `lastFocusedIndex+1` fallback.
+- All three insertion sites switched from `lastFocusedIndex + 1` to `insertIndexAfter(...)`: ForegroundEventBus (new app), BrowserTabEventBus standalone branch (non-stacking tab), and `refresh()`'s `newApps`.
+- Stacking behavior unchanged (the "exception" the user noted): a browser tab whose parent has a card still merges into that stack.
+
+**Watch out for:** `lastUsedPackage` depends on the accessibility service firing `ForegroundEventBus`. If it's off, `lastUsedPackage` stays null and insertion falls back to the old `lastFocusedIndex+1` behavior (safe degradation).
+
+---
+
+### Instance D — 2026-05-29 (Browser: back-gesture grey screen + can't-reopen-some-tabs)
+
+**Done (`Browser` — `ui/BrowserScreen.kt`, `BrowserTabActivity.kt`):**
+
+1. **Grey screen on back gesture** — the `showBackOverlay` dark overlay (`colorScheme.background`) hides the WebView after a back commit and was only cleared in `onPageFinished`, gated on `onPageStarted` having fired. But `WebView.goBack()` into the back-forward cache often fires **neither** callback, so the overlay never cleared → lingering grey over the already-restored page. Fix: (a) added `onPageCommitVisible` (fires on first paint, incl. bfcache restores) to clear the overlay; (b) added a `root.postDelayed(450ms)` safety net in `handleOnBackPressed` (seq-guarded) so the overlay can never persist.
+
+2. **Can't reopen some tab cards** — with `autoRemoveFromRecents="false"` (prior fix) dead task shells persist and the OS recreates them on `moveTaskToFront`, but the recreate path called `webView.restoreState(savedInstanceState)` unconditionally. When the shell has no usable saved WebView state (process was killed), `restoreState` returns null and **no URL was ever loaded** → blank grey tab (reads as "won't open"). Fix: `restoreState(...) != null` check; on failure, fall back to `loadUrl(intent.dataString)`. Document tasks retain their base VIEW intent (URL), so even old cruft shells now reopen to their page.
+
+**Watch out for:** these two browser bugs share the same visual symptom (grey/blank), so a tab that "won't open" and a back-gesture "grey flash" had different root causes but both surfaced the dark `colorScheme.background` fill.
+
+---
+
+### Instance D — 2026-05-29 (tabs stack with their source app via referrer; reopen confirmed)
+
+**Reopen ("can't open tab 1 after opening tab 2") — diagnosed, not a new bug.** Logged repro (DeckTap + dumpsys): Deck correctly called `moveTaskToFront(927)` but task 927 was **gone entirely** (0 live browser tasks, process alive). A clean test on the current build proved the `autoRemoveFromRecents=false` fix works: a fresh tab (#929) **survived going home AND survived opening a second tab** (`sz=1` throughout). So 927/928 were **stale tabs created before the fix took effect**; their cards are dead. New tabs reopen reliably. (Old dead cards persist until dismissed — `refresh()` keeps browser cards regardless since `excludeFromRecents` hides them from `getLiveTasks()`.)
+
+**Stacking ("tabs from Inoreader didn't stack with Inoreader") — fixed.** User confirmed desired behavior: **stack tabs with the source app** (Inoreader + its tabs = one stack). Root cause: `HomeViewModel` guessed the parent via `repo.findRecentlyBackgroundedApp()` (UsageStats), which returned `null` (logged `Parent (immediate/after retry): null`) → fell back to the browser pkg → stacked with another browser card instead of Inoreader.
+
+Fix — pass the launching app from the browser explicitly:
+- **Browser** (`BrowserTabActivity`): on `ACTION_BROWSER_TAB_OPENED`, reads `Activity.getReferrer()` (`android-app://<pkg>`) and adds `parent_package` extra.
+- **Deck** (`BrowserTabReceiver` → `BrowserTabEventBus.NewTabEvent.parentPackage` → `HomeViewModel`): prefers the referrer-provided parent (exact); only falls back to the UsageStats heuristic when the referrer is absent. In-browser new tabs (referrer == browser) correctly skip parent-stacking and group with other browser tabs.
+
+**Verified** (injected referrer via `am start --es android.intent.extra.REFERRER_NAME`): `New tab event ... parent=com.innologica.inoreader` → `Resolved parent: com.innologica.inoreader` → `Stack idx=1` (Inoreader's group) → tab stacked with Inoreader.
+
+**Watch out for:**
+- The New-tab event is lost if Deck's `MainActivity`/`HomeViewModel` isn't alive when the tab opens (SharedFlow replay=0, manifest receiver cold-starts the process but not the UI). Normal when Deck is the running launcher; surfaced here only as a test artifact after reinstalling Deck. The `refresh()` path still creates a card later, but without the referrer parent (so no stack). Pre-existing; not addressed.
+- `DeckTap` (HomeScreen) and `DeckStack` (HomeViewModel) debug logging still present — remove in a cleanup pass once the browser-card behaviors settle.
+
+---
+
+### Instance D — 2026-05-29 (Deck v439: stack-then-unstack fix + shell cleanup notes)
+
+**Stack immediately unstacks — fixed (`HomeViewModel.refresh()` matching).** Once referrer-stacking worked (Inoreader + tab in one group), `refresh()` split it on the next tick. Root cause in the `stillPresent` reconciliation: the existing in-stack Inoreader card carries `taskId = -1` (created from a `ForegroundEventBus` event), but `refresh()` resolves a live taskId for single-instance apps, so `filteredById[existing.id]` (keyed `pkg`) missed the resolved entry (keyed `pkg:taskId`), and the package fallback only matched `taskId == -1` filtered entries → Inoreader was **dropped** from the group → then re-added as a standalone card by the `newApps` path (which is the "spawn on right" the user noticed). Net: stack → split.
+
+Fix: in `stillPresent`, for a **single-instance** package (`pkg !in multiTaskPkgs`), match by package (`candidates.firstOrNull()`) regardless of taskId, so the card stays in its group with the freshly-resolved taskId. Multi-task packages still match by exact id. This also prevents the duplicate (matched ⇒ in `presentPackages`/`presentIds` ⇒ excluded from `newApps`).
+
+**Shell cleanup.** Removed the user's accumulated dead browser cards by force-stopping Deck (its in-memory card state is rebuilt from live apps on relaunch; browser tabs are `excludeFromRecents` so dead ones don't return). The underlying empty **task records** (41 unique roots) could NOT be removed via `am` on Android 15: `am stack remove` takes a STACK id (not task id) and no-ops on these; `am task` has no `remove`. Only `pm clear com.hermes.browser` (also wipes bookmarks/history/prefs) or a reboot clears the task records. Left that choice to the user.
+
+---
+
+### Instance D — 2026-05-29 (Deck v440 + Browser: reliable tab reopen via trampoline activity)
+
+**Confirmed (not inferred):** after tapping a browser card, `topResumedActivity` stayed `com.hermes.deck/.MainActivity` — the tab task was **alive (`sz=1`)** but Deck's cross-app `moveTaskToFront(taskId)` was **rejected** (the `uid=-1 … has no WPC` pattern). `moveTaskToFront` worked earlier in the session (#915), so it's intermittent — a known Android 14/15 cross-app limitation. This is the lifecycle-independent "live task, won't front" branch.
+
+**Fix — browser-side reopen trampoline:**
+- **Browser** `ReopenTabActivity` (new, invisible `Theme.Translucent.NoTitleBar`, `excludeFromRecents`, `noHistory`, `taskAffinity=""`, `singleInstance`, exported): reads `task_id` extra, finds the matching `ActivityManager.AppTask` in its OWN `appTasks`, calls `moveToFront()`, finishes. A process can always front its own task — no BAL grant needed because Deck (foreground) starting this activity brings the browser process forward first.
+- **Deck** `HomeScreen.onGroupTap` browser branch: `startActivity` the trampoline (`setClassName(BROWSER_PACKAGE, "com.hermes.browser.ReopenTabActivity")`, `task_id` extra, `FLAG_ACTIVITY_NEW_TASK`); falls back to `moveTaskToFront` only if the start throws.
+
+**Verified:** backgrounded a fresh tab (task 949) → `topResumedActivity=com.hermes.deck` → fired the trampoline → `topResumedActivity=com.hermes.browser/.BrowserTabActivity t949`. Reliable front. Also works for `sz=0` shells since `appTasks` lists them and `moveToFront()` restores.
+
+**Still partial — "no preview" on the first of two quickly-opened tabs:** the screenshot capture only grabs the *focused* tab; opening tab 2 backgrounds tab 1 before its capture fires, so tab 1 has no preview until it's foregrounded again (then `ACTION_PAGE_LOADED`/`refreshAll` captures it). Not addressed here — would need offscreen rendering or a per-tab capture-on-open. Reopen now works, so the user can foreground tab 1 to populate its preview.
+
+---
+
+### Instance D — 2026-05-30 (Deck v441 + Browser: phantom blank browser cards)
+
+**Symptom:** 6 blank, un-openable browser cards (icon only, no preview). Verified: **zero `BrowserTabActivity` tasks existed** — pure phantoms.
+
+**Root cause (advisor caught — my own ReopenTabActivity was the phantom factory):**
+1. `ReopenTabActivity` (the reopen trampoline, v440) used `finish()` → left `com.hermes.browser` task shells.
+2. `LivePreviewRepository.parseRecentTasks` extracted only the **package** via `mActivityComponent=([^/]+)/`, so a `…/.ReopenTabActivity` task was indistinguishable from a real `…/.BrowserTabActivity` tab → trampoline shells were counted as browser tabs. With ≥2, `com.hermes.browser` enters `multiTaskPkgs` and `refresh()`'s per-task expansion manufactures phantom cards. Each tap on a phantom launched another trampoline → another shell → feedback loop.
+
+**Fixes:**
+- **Browser `ReopenTabActivity`:** `finishAndRemoveTask()` instead of `finish()`; added `onNewIntent` (singleInstance reuse delivered the 2nd launch there, silently no-opping); when the target task isn't in `appTasks` (genuinely gone), broadcasts `ACTION_BROWSER_TAB_GONE` to Deck.
+- **Deck `parseRecentTasks`:** capture the full component and `continue` on `ReopenTabActivity` — trampoline tasks can never be counted as tabs again. (The decisive structural fix.)
+- **Deck reactive cleanup (advisor's option B — only removes provably-dead cards, can't nuke live ones on a transient parse failure):** `BrowserTabReceiver` handles `ACTION_BROWSER_TAB_GONE` → `BrowserTabEventBus.emitTabGone` → `HomeViewModel` drops the card with that taskId. Manifest intent-filter added.
+
+**Verified:** firing the trampoline for a dead taskId produced `BroadcastRecord ACTION_BROWSER_TAB_GONE → pkg=com.hermes.deck (has extras)` in `dumpsys activity broadcasts` — the browser sent it and Deck is the target. Reopen of a live tab still fronts it.
+
+**Watch out for:**
+- `ReopenTabActivity` (singleInstance) still leaves a transient task shell in some cases — now **harmless** because `parseRecentTasks` excludes it. Could be eliminated later by dropping `singleInstance`, but not necessary.
+- Existing phantom cards clear when the user taps them (tap → trampoline → TAB_GONE → card removed) or by restarting Deck.
+
+---
+
+### Instance D — 2026-05-30 (Deck v442 + Browser: review-fix batch)
+
+Implemented the safe, high-value items from the code review.
+
+**Browser:**
+- **Panel drag-open blank** (regression from the address-bar-focus fix): `BrowserScreen.kt` `showPanel = isPanelOpen` → `(panelProgress > 0f || isPanelOpen) && !isExpanded`. Panel content shows during the drag again, still hidden during address-bar search.
+- **Main-thread DB writes:** `HistoryDatabase.record` and `BookmarksDatabase.add/remove` now dispatch to a per-DB single-thread `Executor` (record() ran on the UI thread from `onPageFinished` every page load). Reads unchanged (callers already use `Dispatchers.IO`).
+- **Favicon privacy + caching:** `BookmarkFaviconItem` fetched `google.com/s2/favicons?domain=…` for every bookmark on every panel open — leaked all bookmarked domains to Google + no cache. Now fetches each site's own `https://<domain>/favicon.ico` with a process-level `faviconCache` (+ `faviconMisses` set so faviconless domains aren't retried).
+- **`LIKE ESCAPE`:** both DB `search()` escaped `%`/`_` with `\` but had no `ESCAPE '\'` clause (no-op). Added it.
+- **Doc drift:** rewrote `Browser/CLAUDE.md` — WebView (not GeckoView), `ReopenTabActivity`, `autoRemoveFromRecents=false`, and the real broadcast-based Deck integration (`ACTION_BROWSER_TAB_OPENED/FOCUSED/PAGE_LOADED/TAB_GONE`).
+
+**Deck:**
+- `HomeViewModel` `prefs.getString("pinned","")!!` → `?: ""` (smell, not a real NPE).
+
+**Deferred (intentionally):**
+- Strip `DeckTap`/`DeckStack` debug logging — kept one more round while the phantom-card fix is being validated.
+- Tab-dismiss removes its task (leak), root-shell injection hardening, `refresh()` refactor + tests, pref-key consolidation, screenshot exclusion list — larger/structural, each its own pass.
+
+---
+
+### Instance D — 2026-05-30 (Browser: file downloads)
+
+**Symptom:** GitHub (and other) download links did nothing — the WebView had no `DownloadListener`, so downloads were silently dropped. (The existing `DownloadManager` code was only the long-press "save image" path.)
+
+**Fix (`BrowserScreen.kt`):** added `webView.setDownloadListener { … }` that hands off to the system `DownloadManager` — guesses the filename via `URLUtil.guessFileName`, forwards the `User-Agent` and the WebView's cookies (`CookieManager.getCookie`) so authenticated/redirected downloads (GitHub release assets, codeload) succeed, writes to public `Environment.DIRECTORY_DOWNLOADS`, shows a notification + a toast. Cleared in `onDispose`. Works for both direct attachment links and `target="_blank"` downloads (those open a new tab via `onCreateWindow`, whose WebView now also has the listener). No storage permission needed (DownloadManager → public Downloads on API 29+). Removed "Download delegate" from `Browser/CLAUDE.md` not-yet-built list.
+
+---
+
+### Instance D — 2026-05-30 (Deck v443–v444: settings UI — large app bar + per-provider search pages)
+
+**Large app bar (v443):** main `SettingsScreen` `TopAppBar` → `LargeTopAppBar` with `exitUntilCollapsedScrollBehavior` + `Modifier.nestedScroll(...)` on the Scaffold. Sub-pages still use the regular `TopAppBar`. Added `import androidx.compose.ui.input.nestedscroll.nestedScroll`.
+
+**Per-provider search settings pages + per-provider result limit (v444):**
+- `SearchSettingsScreen` rewritten from a flat toggle list into a **navigable list** of providers (grouped System/Root/Built-In/External). Each row shows on/off + limit summary and opens a detail page. Backed by `SearchProviderMeta(limitKey, enableKey, label, description, group, isPlugin)` + `BUILTIN_SEARCH_PROVIDERS`. `limitKey == SearchProvider.id`; `enableKey` is the static id (in `disabled_static_providers`) or the plugin **authority** (in `disabled_plugins`).
+- New `SearchProviderDetailScreen`: enable toggle, **Result limit** (dialog: Unlimited/1/3/5/10/20 → `provider_limit_<limitKey>` int), provider description, and the provider-specific extras moved here — Apps→"Visible apps only", Widgets→"Manage widgets", Dialer→"Number key layout".
+- Enforcement: `SearchViewModel` now applies `prefs.getInt("provider_limit_${provider.id}", 0)` per provider (`res.take(limit)` when > 0) before flattening.
+
+**Watch out for:** the detail page is shown as an overlay via `selected?.let { … }` (same pattern as the other settings sub-pages). On back it re-reads the disabled sets + bumps `refreshKey` so the list summaries update. Not yet verified on-device (device was locked) — user to confirm the Search list, a provider detail, and that a set limit actually caps that provider's results.
+
+---
+
+### Instance D — 2026-05-30 (Deck v446: app shortcuts in drawer long-press menu)
+
+Android static/dynamic/pinned shortcuts (e.g. Gmail "Compose") now appear at the top of the drawer long-press popup, split from Deck's actions by a divider.
+
+**`LauncherSheet.kt`:**
+- `loadAppShortcuts(launcherApps, pkg)`: `LauncherApps.getShortcuts(ShortcutQuery{ setPackage; MANIFEST|DYNAMIC|PINNED }, Process.myUserHandle())`, filtered to `isEnabled`, sorted by `rank`, capped at 5. Wrapped in `runCatching` — `getShortcuts` throws `SecurityException` unless Deck holds the HOME role, in which case we show none.
+- `rememberAppShortcuts(pkg, load)`: returns `(LauncherApps, List<ShortcutInfo>)`; only loads while `load` (= `showMenu`) is true, so no per-grid-item fetch until a menu opens.
+- `AppShortcutsSection` renders each shortcut (icon via `getShortcutIconDrawable` + `shortLabel`) launching with `startShortcut(shortcut, null, null)`, then a `HorizontalDivider`. Added to both `SheetAppGridItem` and `SheetAppListItem` menus (above "Edit tags").
+
+**Watch out for:** shortcuts require Deck to be the default launcher; otherwise the section is silently empty. `Context.LAUNCHER_APPS_SERVICE` referenced fully-qualified (`android.content.Context` wasn't imported in the file).
+
+---
+
+### Instance D — 2026-05-30 (Deck v448: two-box context menu + collapsible "More options")
+
+**`AppContextMenu` redesigned** (`LauncherSheet.kt`) from a single `content` slot into two boxes with an 8dp gap:
+- Signature now `(expanded, onDismissRequest, hasShortcuts, shortcuts: @Composable ColumnScope.() -> Unit, actions: @Composable ColumnScope.() -> Unit)`.
+- Box 1 = shortcuts (rendered only when `hasShortcuts`). Box 2 = actions, collapsed behind a "More options" item (`Icons.Default.MoreHoriz`) when shortcuts exist; shown expanded when there are none. Extracted `AppContextMenuBox` (the rounded `primaryContainer` Surface). Removed the now-unused `AppShortcutsSection` + `HorizontalDivider` import.
+- `actionsExpanded` is `remember(expanded, hasShortcuts) { mutableStateOf(!hasShortcuts) }` — recomputes when the menu opens and once shortcuts finish loading (the async load settles during the ~150ms open animation, so no visible flicker).
+
+**Call sites updated** (signature change is cross-file since `AppContextMenu` is `internal`): both drawer items in `LauncherSheet.kt` (pass real shortcuts) and both `LauncherSearchBar.kt` menus — app-result and widget-result — now pass `hasShortcuts = false, shortcuts = {}, actions = { … }`, preserving their single-box behavior.
+
+---
+
+### Instance D — 2026-05-30 (Deck v449–v450: result-limit slider + animated "More options")
+
+- **Result limit → discrete slider** (`SettingsScreen.kt`, `SearchProviderDetailScreen`): replaced the radio `AlertDialog` with a `Slider` (`valueRange 0f..8f`, `steps = 7` ⇒ 9 stops). Index 0–7 → limit 1–8; index 8 → Unlimited (stored 0). Live value label on the right; persists in `onValueChangeFinished`. Removed `showLimitDialog` state, the dialog block, and `SEARCH_LIMIT_OPTIONS`. Added `import kotlin.math.roundToInt`. Legacy limits >8 (old 10/20) render at the Unlimited stop.
+- **Animated "More options" expansion** (`LauncherSheet.kt`): `AppContextMenuBox` gained a `modifier` param; the actions box uses `Modifier.animateContentSize(spring(DampingRatioMediumBouncy, StiffnessMedium))` — same spec as the popup's `scaleIn` — so tapping "More options" springs the box open. Added `import androidx.compose.animation.animateContentSize`.
+
+**Watch out for / follow-up:**
+- Background browser tabs (in `mHiddenTasks`) still won't get a refreshAll snapshot until the live accessibility capture fires (user dwells on the tab ~4s). A future enhancement: parse `mHiddenTasks` in `parseRecentTasks` to recover hidden browser taskIds and load their per-task WMS snapshots, so all tabs show distinct previews immediately. Hidden-task line format differs (`Task{... #<id> ... A=<uid>:<pkg>}`, no `mActivityComponent`).
+- The `multiTaskPkgs` heuristic remains correct for normal multi-window apps; only the browser needed the override.
+- The `FLAG_ACTIVITY_RESET_TASK_IF_NEEDED` flag only affects existing tasks; it has no effect on cold starts.
+
+---
+
+### Instance D — 2026-05-30 (Deck v452: Claude "Ask Claude" tap-to-trigger search provider)
+
+A new built-in search provider that surfaces an "Ask Claude" result for essentially any query but **makes no network call until the user taps it** (per user spec). Tapping fires a one-shot Anthropic Messages API request and renders the answer inline in the result card.
+
+**New files (`ui/search/providers/`):**
+- `AnthropicClient.kt` — raw-HTTP (`HttpURLConnection`, no SDK) `object` with `suspend fun ask(context, query): Result<String>` on `Dispatchers.IO`. POSTs to `https://api.anthropic.com/v1/messages` with headers `x-api-key`, `anthropic-version: 2023-06-01`, `content-type`. Body built with `org.json` (JSONObject/JSONArray — **not** string interpolation, since the query is arbitrary text): `{model, max_tokens:1024, system, messages:[{role:user, content:query}]}`. A short system prompt keeps answers concise/plain-text/final-answer-only. Parses the first `content[]` block with `type=="text"`. Reads `claude_api_key` + `claude_model` from `deck_prefs`; default model `claude-opus-4-8`. **No prompt caching** (unique tiny prefix each call, below the cacheable minimum — would only add cost). No `thinking` field (off → fast launcher latency).
+- `ClaudeProvider.kt` (id `"claude"`) — emits one `SearchResult.ClaudeResult(query)` for any trimmed query ≥2 chars **only when `claude_api_key` is set**; otherwise silent. Never calls the API.
+
+**Wiring:**
+- `SearchResult.kt`: added `data class ClaudeResult(val query: String)`.
+- `SearchViewModel.factory()`: registered `ClaudeProvider(appCtx)` after `AiProvider`.
+- `LauncherSearchBar.kt`: new `ClaudeResultCard` — stateful (idle → loading → answer/error), self-contained (no `onResultSelected`/`onDismiss`, so a tap never clears the query). `answer`/`error` held in `rememberSaveable(result.query)` so they survive `LazyColumn` scroll-dispose; in-flight `loading` is plain `remember` (cancels if disposed → back to idle, acceptable). Tap = (re)ask while idle/errored; answered = no-op. Updated the three exhaustive `when`s (`SearchResultRow`, `groupResults` → group label "Claude", `resultKey`). Imports added: `AnthropicClient`, `rememberSaveable`, `kotlinx.coroutines.launch`.
+- `LauncherSheet.kt`: updated its `resultKey` `when` (the second exhaustive site) for `ClaudeResult`.
+- `SettingsScreen.kt`: added `SearchProviderMeta("claude", … , "Built-In")` and a `"claude"` branch in `SearchProviderDetailScreen` with a masked **API key** field (Show/Hide via `PasswordVisualTransformation`) → `claude_api_key`, and a **Model** field (placeholder `claude-opus-4-8`) → `claude_model`. Imports added: `PasswordVisualTransformation`, `VisualTransformation`.
+
+**Build:** v452, installed on device. `INTERNET` permission already present in the manifest — confirmed.
+
+**Watch out for / notes:**
+- **No key ⇒ no card.** The only discovery path when unconfigured is Settings → Search → Claude. (Deliberate; a "Set API key" deep-link card was considered and skipped to keep the card callback-free.)
+- The generic Result-limit slider still shows on the Claude detail page — harmless (provider returns 1 result) but cosmetically pointless; left as-is.
+- `ClaudeResult` is intentionally **not** persisted as a recent click (`SearchViewModel` serialize/recentKey use `else -> null`) — it's transient.
+- Not yet user-verified on-device: enter a key in settings, type a query, confirm the "Ask Claude" row appears and tapping it returns an answer inline.
+
+---
+
+### Instance D — 2026-05-30 (Deck v454–v456: Claude provider polish — key toggle, focus-on-tap, usage bar)
+
+Follow-ups to the v452 Claude provider, all on-device with the user iterating live. Confirmed via `adb run-as cat shared_prefs/deck_prefs.xml`: the provider gate works — the row appears once `claude_api_key` is set (the user's earlier "I don't see it" was simply no key entered yet). **Note:** reading prefs over adb prints the key in plaintext into the transcript; flagged to the user to rotate if the session log isn't private.
+
+**v454:**
+- **API-key field show/hide fix** (`SettingsScreen.kt`): the toggle was a `TextButton` jammed into the `OutlinedTextField` `trailingIcon` slot (clipped/awkward). Replaced with a proper eye `IconButton` (`Icons.Filled.Visibility` / `VisibilityOff`). Added those two icon imports.
+- **Tap "Ask Claude" → hide other result groups.** Lifted a focus flag into `SearchViewModel`: `claudeFocus: StateFlow<String?>` + `focusClaude(query)`; reset to null in `onQueryChange`/`clearQuery` (so editing/clearing the query restores normal results). `ClaudeResultCard` gained an `onAsk: ((String)->Unit)?` that fires on tap (in `ask()`). Threaded a new optional `onClaudeAsk` param through `SearchResultRow` → `ResultGroup` (both `internal`, used by both search surfaces). Both render sites (`LauncherSearchBar` LazyColumn + `LauncherSheet` LazyColumn) now `collectAsState()` the focus and filter `results` to only `ClaudeResult` when focused before `groupResults`. The `group:Claude` LazyColumn item key is stable across the filter, so the card isn't disposed mid-call (loading state + coroutine survive).
+- Reverted the v452→(unbuilt) gate-removal experiment; the key gate stays.
+
+**v456 — token usage bar in the Claude card** (user asked for "usage out of available tokens"; clarified via AskUserQuestion → "last answer's usage", since the API exposes **no** remaining-credit/quota feed):
+- `AnthropicClient`: added `data class ClaudeResponse(text, inputTokens, outputTokens)`; `ask()` now returns `Result<ClaudeResponse>` (parses `usage.input_tokens`/`output_tokens`); `MAX_TOKENS` made public.
+- `ClaudeResultCard`: `supportingContent` is now a `Column` with the status label + an always-present `LinearProgressIndicator` — indeterminate while loading, else determinate `outputTokens / MAX_TOKENS (1024)` clamped 0..1. Label after an answer: "Claude · N / 1024 output · M in". Usage held in `rememberSaveable` ints (used `mutableStateOf(0)`, not `mutableIntStateOf`, for saver compatibility on Compose 1.6.8). Bar denominator is the per-call max-output budget (the only honest "available" number per request — not account credit).
+
+**Verified on-device (user, 2026-05-30):** live success path works — tapping "Ask Claude" returns an answer inline and fills the usage bar. The whole v452→v456 Claude provider is confirmed working end-to-end.
+
+---
+
+### Instance D — 2026-05-30 (Deck v458: collapsible widget sections + search-provider ranking engine)
+
+Two independent features. Per advisor: shipped the ranking **engine + trivial up/down UI first** to validate the pipeline on-device before sinking time into hand-rolled drag (drag = next build, the UX the user actually chose via AskUserQuestion).
+
+**Collapsible widgets** (`WidgetManagementScreen` in `LauncherSearchBar.kt`): each pinned-widget `Surface` now has a tappable header `Row` (label + **Settings** button + ▲/▼ `ExpandLess`/`ExpandMore` chevron) and the `LiveWidgetCard` body is wrapped in `AnimatedVisibility(expanded)`. **Settings moved into the header** so it's reachable while collapsed (the user's actual goal: adjust settings without scrolling past every tall preview). Default **collapsed** — screen-level `var expandedComps by remember { mutableStateOf(setOf<String>()) }`. Added `ExpandLess`/`ExpandMore` imports.
+
+**Provider ranking — engine** (`SearchViewModel`): new pref `search_provider_order` = comma-joined provider ids. After building `enabledStatic + pluginProviders`, sorts by `order.indexOf(id)` with **−1 → Int.MAX_VALUE** (advisor catch: bare indexOf sinks unknowns to the *top*) and stable `sortedBy` (new providers keep registration order at the end). Both search surfaces inherit it because `flatten()` is provider-contiguous and `groupResults` preserves first-appearance order. `limitKey == provider.id` for builtins **and** plugins (`PluginSearchProvider.id = "plugin:${plugin.id}"`), so the settings order keys map straight onto engine ids.
+
+**Provider ranking — settings UI** (`SettingsScreen.kt`, `SearchSettingsScreen`): rewrote the category-grouped list into **one flat ranked list** (the flatten tradeoff we accepted for global ranking). Order state `providerOrder`; display = saved-order metas first, then unranked metas in natural order; each row has ▲/▼ `IconButton`s (`move(index, ±1)` swaps + persists the *full* visible order). Tapping the row still opens the detail page. Added `KeyboardArrowUp`/`Down` imports. **Also added two previously-missing providers to `BUILTIN_SEARCH_PROVIDERS`** — `hermes_browser_history` ("Hermes Browser History") and `browser_suggestions` ("Web Suggestions") — so every engine provider is rankable/toggleable and ranking doesn't silently sink them.
+
+**Next build (planned):** swap the ▲/▼ rows for **drag-to-reorder** (user's choice). Advisor recipe: `detectDragGesturesAfterLongPress`, drag state in plain vars, **imperative edge auto-scroll from inside the gesture coroutine (NOT a LaunchedEffect** — per `project_deck_reorder` memory), `Modifier.animateItem()` for non-dragged rows. Same `search_provider_order` pref underneath.
+
+**Note for the other instance:** CLAUDE.md's "Compose BOM 2024.06.00" is stale — CardStrip uses `Modifier.animateItem()` (Compose ≥1.7). Don't trust that version string for API decisions; check actual usage.
+
+---
+
+### Instance D — 2026-05-30 (Deck v460–v461: drag-to-reorder providers + model-aware Claude prompt)
+
+**v460 — drag-to-reorder** (`SettingsScreen.kt`, `SearchSettingsScreen`): replaced the ▲/▼ arrows with long-press drag in a `LazyColumn`. Per advisor recipe: `detectDragGesturesAfterLongPress` on the LazyColumn; plain-var drag state (`dragKey`, `dragOrder`, `fingerY`, `grabWithin`, `autoScroll`); dragged row positioned by `graphicsLayer { translationY = fingerY - grabWithin - info.offset }` reading live `layoutInfo`; non-dragged rows use `Modifier.animateItem()`; **`settle()`** moves `dragKey` to whatever slot the finger is over. **Edge auto-scroll** runs in a coroutine launched from `onDragStart` via `rememberCoroutineScope` (loops `while (dragKey != null)` doing `scrollBy(autoScroll)` + `settle()` each `withFrameNanos`) — **NOT** a state-keyed `LaunchedEffect` (per `project_deck_reorder`). Header/`no_plugins` items keyed and excluded from drag. Persists the full order to `search_provider_order` on `onDragEnd`/`onDragCancel`.
+  - **Advisor-caught bug (fixed before install):** `pointerInput(Unit)` runs once and froze `baseOrderedKeys` at first composition → a 2nd drag reverted the 1st and corrupted the saved order. Fixed with `val currentBase by rememberUpdatedState(baseOrderedKeys)`, used inside the gesture (`onDragStart`, `settle`). **User should verify:** drag one provider to top, release, drag a *different* one — first move must survive.
+  - I can't self-test touch gestures over adb, so the drag *feel* (grab, smoothness, edge auto-scroll, scroll-vs-drag coexistence) is user-verified only. Removed `KeyboardArrowUp/Down` imports, added `DragHandle` + gesture/lazy/graphics imports.
+
+**v461 — model-aware Claude system prompt** (`AnthropicClient.kt`): replaced the const `SYSTEM_PROMPT` with `systemPrompt(model)` built per-request. Now tells Claude it *is* Claude (Anthropic), the exact model id it's running as, and that it's embedded in Deck's launcher search on Android reached via an "Ask Claude" result — so it frames answers as quick on-the-go questions. (User asked for Claude to be *aware* of its context/model, explicitly NOT to display the model in the card — a brief card-display helper was added then reverted.)
+
+### Instance D — 2026-05-30 (Deck v463: inline multi-turn Claude chat + recent sessions)
+
+The big one. User chose (AskUserQuestion) **inline** conversation, and **each message = its own card** (like provider cards), so the conversation is owned by the ViewModel and rendered as one card per message in the results list.
+
+- **`providers/ClaudeChat.kt` (new):** `ChatMessage(role, content)`, `ChatSession(id, title, updatedAt, messages)`, `ClaudeChatState(sessionId, messages, loading, error, lastIn/OutTokens)`, and `ClaudeChatStore` (JSON in `deck_prefs` key `claude_chat_sessions`, capped at 20 by recency; `recent()/get()/save()`).
+- **`AnthropicClient.ask`** now takes `List<ChatMessage>` (multi-turn) instead of a single query string — builds the full `messages[]` array.
+- **`SearchViewModel`:** replaced the v454 `claudeFocus` flag with `activeChat: StateFlow<ClaudeChatState?>` + `startClaude(query)` / `replyClaude(text)` / `resumeClaude(session)` / `endClaude()`. API call runs in `viewModelScope` via `sendClaude()`. `onQueryChange` ends the chat (editing the search box returns to results; chat stays saved in recents); `clearQuery` ends it too.
+  - **Advisor-caught race (fixed before install):** `sendClaude` callbacks now persist to the store **unconditionally** but only write `_activeChat` **if `_activeChat.value?.sessionId == state.sessionId`** — otherwise an in-flight response could resurrect a closed chat or clobber a different one the user switched to.
+- **Rendering:** new `internal fun LazyListScope.claudeConversationItems(state, onSend, onClose)` in `LauncherSearchBar.kt` emits `ClaudeMessageCard` (per message; user vs assistant styled), `ClaudeThinkingCard`, `ClaudeErrorCard`, `ClaudeReplyCard` (OutlinedTextField + Send + usage bar + "Close chat"). Both surfaces (`LauncherSearchBar`, `LauncherSheet`) branch: `if (activeChat != null) claudeConversationItems(...) else <normal results>`. The idle `ClaudeResultCard` is now ask-row + up to 3 recent sessions (tap row → `startClaude`, tap session → `resumeClaude`). `SearchResultRow`/`ResultGroup` carry `onClaudeStart`/`onClaudeResume` (replaced `onClaudeAsk`).
+
+**Unverified on-device — user test list (each covers something compile didn't):**
+1. Start chat → reply → 2nd answer appends as its **own card**, thread readable.
+2. **Race:** send a reply, and *while thinking*, tap "Close chat" — answer must NOT reopen the chat.
+3. Reply field usable with keyboard up? **Likely the weak spot** — reply card sits at the bottom of the fixed-height (`heightIn(max=maxListHeight)`) DockedSearchBar content; IME may cover it rather than scroll it above. If so, needs `imePadding`/`bringIntoView`/`imeNestedScroll` — depends what shows.
+4. Close chat → conversation shows in the 3 recent sessions on the idle card → tap → resumes.
+5. Edit search box mid-chat → returns to normal results, chat saved in recents.
+6. Physical-keyboard (Clicks) note: hardware keys only reach the reply field if it has focus; otherwise they route to `onQueryChange` (search) and end the chat.
+
+**Confirmed working (user):** v463 inline chat works end-to-end (multi-turn, recents, resume).
+
+---
+
+### Instance D — 2026-05-30 (Deck v465–v467: chat reply-bar polish + Enter-to-top-result)
+
+**v465 — reply-bar UX (user requests):** in `LauncherSearchBar.kt`, replaced the `LazyListScope.claudeConversationItems` extension with a `@Composable internal fun ClaudeConversation(state, onSend, modifier)` — a `Column { LazyColumn(weight(1f, fill=false)) { message cards } ; ClaudeReplyBar(imePadding) }` that auto-scrolls to the newest message. `ClaudeReplyBar` (was `ClaudeReplyCard`): removed the "Close chat" button (exit by editing/clearing the search box → `onQueryChange`/`clearQuery` end the chat); **Enter sends** (`singleLine`, `KeyboardOptions(imeAction=Send)` + `KeyboardActions(onSend=…)`); **no outline** (`TextField` with transparent container + transparent indicator colors instead of `OutlinedTextField`); `imePadding()` to keep it above the keyboard. Both call sites now branch `if (chat!=null) ClaudeConversation(...) else LazyColumn { results }` (conversation moved OUT of the results LazyColumn). Imports: `rememberLazyListState`, `KeyboardOptions/Actions`, `ImeAction`.
+  - **Caveat (user to confirm):** whether `imePadding` fully lifts the bar depends on the launcher window's IME inset reporting — unverified. Enter-to-send works regardless.
+
+**v467 — Enter activates the top result** (user: "if I hit enter, go to the top result"): new `internal fun activateSearchResult(context, result): Boolean` in `LauncherSearchBar.kt` performs each result's default open action (App launch / Contact+Dialer `ACTION_DIAL` / Plugin `parseUri` / BrowserHistory+BrowserSuggestion `ACTION_VIEW` / Settings→`SettingsActivity` / SystemSettings `Intent(action)` / File via `FileProvider`), returns true if it launched. Both `onSearch` handlers (DockedSearchBar in `LauncherSearchBar`, `ActiveSearchField` in `LauncherSheet`) now: top is `ClaudeResult` → `startClaude(query)`; else `activateSearchResult` → clear on success; sheet still falls back to web search on empty. Replaced the old partial `when(top)` in the DockedSearchBar onSearch (dropped its `Log.d`).
+  - **Padding regression fix:** the v465 `ClaudeConversation` split dropped the sheet's 16dp horizontal inset → the LauncherSheet call site now passes `modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)` (DockedSearchBar matches its results with no extra inset).
+
+**v468 — chat reply field flew off the top when keyboard active (IME layout fix).** Root cause: MainActivity is `windowSoftInputMode="adjustResize"` **with** `enableEdgeToEdge()` → the window does NOT auto-resize; insets are manual. The v465 `imePadding()` was on the reply bar *inside* a `heightIn(max=maxListHeight)` area, and `maxListHeight` is computed **without** subtracting the IME — so imePadding added a full keyboard-height of padding inside a keyboard-ignoring box, over-lifting the bar (only token bar + send + search field stayed visible). Fix in `ClaudeConversation`: moved `imePadding()` to the **outer Column** and gave the column a **definite height** (LauncherSearchBar caller now `Modifier.height(maxListHeight)` instead of `heightIn(max=…)`; LauncherSheet caller `fillMaxSize()` is already definite). LazyColumn is `weight(1f)` (fill=true) so the message list fills and the reply bar pins at the bottom of the shrunk-above-keyboard content. **User to confirm** the reply field is now visible above the keyboard.
+
+**v470 — v468 was the WRONG fix; screenshot proved it.** Captured the broken state with `adb exec-out screencap -p > file` (NOT PowerShell `>` — that writes UTF-16 and corrupts the PNG; use the Bash tool or `adb pull`). Screenshot showed the reply bar jammed under the search field with a huge empty gap to the keyboard and **no message cards** → classic **double IME compensation**: the Material3 `DockedSearchBar` surface already insets its content for the keyboard, so *any* `imePadding()` I add is a second lift that overshoots to the top (content region went negative, collapsing the LazyColumn). Fix: **removed `imePadding()` from `ClaudeConversation`** entirely and reverted the LauncherSearchBar caller to `heightIn(max=maxListHeight)`. IME handling is now **per-surface via the caller's modifier**: DockedSearchBar = none (surface self-insets); LauncherSheet caller = `…padding(horizontal=16).imePadding()` (its custom drawer does NOT self-inset). Lesson: when a chat/IME layout misbehaves, screenshot it before theorizing.
+
+### Instance D — 2026-05-31 (Deck v490: Home Assistant search provider — Milestone A, connectivity only)
+
+New feature (user request): control HA devices from search. User picked **Nabu Casa/HTTPS** (no cleartext config needed) and **v1 scope = on/off + dimming** (light/switch/input_boolean); more domains later. Built in two milestones per advisor (isolate connectivity from controls).
+
+- **Milestone A (v490, DONE, awaiting on-device confirm that entities show up):**
+  - `providers/HomeAssistantClient.kt` — raw HTTPS (no SDK). Prefs `ha_base_url` + `ha_token` (Bearer). `states()` GET `/api/states` → parse, filter to `{light,switch,input_boolean}`, **10s @Volatile cache** (typing doesn't refetch). `ping()` GET `/api/` for test-connection. `callService()` POST `/api/services/<domain>/<service>` and `patchCache()` — both present but **unused until Milestone B**. `HaEntity(entityId,domain,friendlyName,state,brightness)`.
+  - `providers/HomeAssistantProvider.kt` — id `home_assistant`; filters cached entities by friendly name / entity_id; silent until configured. Registered in `SearchViewModel` staticProviders (before AiProvider).
+  - `SearchResult.HomeAssistantResult(entityId,domain,friendlyName,state,brightness)`. `groupResults`→"Home Assistant"; `SearchResultRow`→`HomeAssistantCard`. **Four exhaustive `when(result)` needed the branch:** `groupResults` + `SearchResultRow` (LauncherSearchBar) AND `resultKey` in BOTH LauncherSearchBar (2178) and LauncherSheet (1709) — keyed `"ha:${entityId}"`.
+  - `HomeAssistantCard` — **read-only for A** (name + state + brightness%); Lightbulb icon tinted by on/off.
+  - Settings → Search → Home Assistant: Base URL + token (password) + **Test connection** (`HomeAssistantClient.ping`). Provider meta added to `BUILTIN_SEARCH_PROVIDERS`.
+- **Milestone B (v493, DONE, user confirmed A works).** `HomeAssistantCard` now: light = `Switch` + brightness `Slider`; switch/input_boolean = `Switch`. State keyed on `entityId` (survives cache reverts); on `callService` success → `HomeAssistantClient.patchCache(...)`. Slider fires only on `onValueChangeFinished` → `light/turn_on {brightness_pct}`. Toggle reverts local `on` on failure. (`HomeAssistantClient` needed importing into LauncherSearchBar.)
+- **v491 — widget recents answered:** user wants un-loadable ones *hidden*, not removed-entirely or placeholder-shown. `SearchViewModel.deserializeResult` "widget" branch now resolves `widgetPinRepo.getPinnedWidgetIdByComponent(comp)` and **returns null (drops the recent) if unbound**, else sets `appWidgetId` so it renders live. So blank-search shows only fully-loaded widgets.
+- **Still queued:** (1) long-press result → "Search Configuration" → provider settings. (2) HA: add fan/cover/climate/scene/media domains. (3) **Blank-query search → Google-Now-style contextual feed** (user asked, explicitly "later"; saved to memory `deck-context-feed`).
+
+**v511 — drawer gradient no longer eats taps.** Top/bottom edge fades in `AppDrawer.kt` were overlay `Box`es (`align(Top/BottomCenter).background(verticalGradient)`) drawn ON TOP of the grid/list → swallowed taps on icons in the top/bottom 32dp. Replaced with a draw-only fade: a `fadeModifier` = `Modifier.fillMaxSize().drawWithContent { drawContent(); drawRect(top gradient); drawRect(bottom gradient) }` applied to the `LazyColumn`/`LazyVerticalGrid` (and the same for the `AlphabetSlider`'s 48dp bottom fade on its `BoxWithConstraints`). Identical visual; draw passes never hit-test.
+
+**v518/v519 — LauncherSheet drawer bottom-row taps (the REAL "gradient" bug).** v511 fixed `AppDrawer.kt` but the user's drawer is the **`LauncherSheet` `showDrawerGrid` branch** — different code. Two culprits: (v518) the invisible floating pill (`pillAlpha`→0 when DrawerOpen) still ran its drag `pointerInput` over the drawer's bottom rows → added `|| mode==DrawerOpen` to its early-return (its gesture only tracks upward drags, useless at full height). (v519, the main one) the **bottom gradient `Box`** (`align(BottomCenter).height(totalFade).background(verticalGradient)`) overlay swallowed taps. KEY: bottom `contentPadding` only clears items when scrolled to the BOTTOM; scrolled to the TOP, the bottom-of-screen rows sit UNDER the bottom gradient → only the icon's top edge was tappable ("tap the very edge"). Fix: `fadeModifier` = `fillMaxSize().drawWithContent{ drawContent(); drawRect(top border+fade); drawRect(bottom border+fade) }` on the `LazyColumn`/`LazyVerticalGrid`; removed the bottom gradient Box; stripped the gradient bg off the top Box (kept its drag-handle `pointerInput`); left border Box kept (cleared by `contentPadding start`). Needed `import …geometry.Size`. ⚠️ But v519 did NOT fix the tap — disproving the "background blocks" theory.
+
+**KNOWN ISSUE — TO INVESTIGATE (user-reported, deferred).** Intermittently (NOT always), on phone unlock, the recents/card view shows with **no visible card** in the current position, but the user can **scroll left to reveal other apps** — so the strip has cards, just the front/current one is blank/missing. Likely a resume/race on unlock: the `HorizontalPager` (`CardStrip.kt`) renders before the front card's data is ready, OR the front "recent" is momentarily Deck itself / an empty entry (UsageStats list ordering/loading on resume), OR initial pager page index is off. Repro is flaky. Start by logging `HomeViewModel.recentApps` contents + the pager's currentPage at the moment it's shown on unlock (ON_RESUME), and check whether the blank front item is an empty/self entry vs a real app missing its screenshot+icon.
+
+**v523 — secure/FLAG_SECURE apps fall back to icon card (no black preview).** `ScreenshotAccessibilityService.captureScreenshot.onSuccess`: after copying to a software bitmap, `isUniformFill(soft)` samples an 11×11 grid of the CENTRAL area (10–90% w, 20–80% h; excludes status/nav bars which aren't secure) and returns true if per-channel spread ≤6 (a solid fill = FLAG_SECURE black, or a splash). If uniform → recycle + `ScreenshotCache.remove(cacheKey)` + return → card shows the app icon. Real apps (even dark) have pixel variation so they pass. Existing black cards self-clear on the secure app's next foreground (re-capture → detected → removed). Tighten the ≤6 threshold or add a darkness requirement if a legit app misdetects.
+
+**v526 — stutter ROOT CAUSE found via per-frame logging + fixed (awaiting user visual confirm).** Instrumented `LauncherSheet` render with a per-frame `Log.d("DeckStutter", …)` of ime/pillY/max/anim/run/pinned/TOP. The close log proved it: `anim` is EXACTLY one frame behind `maxDrawerHeight` (e.g. `max=1278 anim=1179`=prev frame's max), so `pinnedOpen`'s `anim>=max-1f` never engaged during the close → `TOP` wandered 182→281→182. Fix: also pin when `maxDrawerHeight` is CHANGING this frame (keyboard animating, vs a finger drag which keeps max constant while anim drops): `var prevFrameMax by remember{mutableStateOf(maxDrawerHeight)}`, `maxChanging = abs(max-prevFrameMax)>1f`, `pinnedOpen = open && !isRunning && (maxChanging || anim>=max-1f)`, `SideEffect{ prevFrameMax = max }`. Instrumentation Log.d removed from source (compiles out next build). Confirmed reasoning from logs but NOT yet user-confirmed visually.
+
+**v524 — stutter fix attempt (advisor zero-hook, AWAITING USER CONFIRM).** Rejected the ~6-gesture-hook flag refactor AND the fraction refactor (too much blast radius on working gesture code for a 1-frame cosmetic issue). Instead, render rule only: `pinnedOpen = open && !drawerHeightAnim.isRunning && drawerHeightAnim.value >= maxDrawerHeight - 1f`; `renderedHeightPx = if (pinnedOpen) maxDrawerHeight else drawerHeightAnim.value` (both coerceAtLeast pillHeightPx). Reads `.value` so it recomposes per frame. Keeps v521 `imeResizeWhileOpen` snap so value stays ≈max across the close. No gesture code touched. **RISK the advisor flagged: if the LaunchedEffect snap lands a frame late, `value < maxDrawerHeight-1f` during fast IME → `pinnedOpen` false → no improvement.** If still stuttering: INSTRUMENT (log `pillBottomY`/`maxDrawerHeight`/`drawerHeightAnim.value`/`pinnedOpen` per frame on close), don't keep guessing.
+
+**v522 — gap ramp (partial).** Ramped `bottomGapPx` smoothly 5dp→16dp over the last 16dp of IME inset (was a hard `if (imeBottomPx > navBarPx) 16 else 5` STEP that jumped the top edge). **STILL NOT FULLY FIXED — user still sees a stutter (paused for token limit, resume next session).** Root cause of the residual: the height is snap-tracked via `LaunchedEffect(maxDrawerHeight)`, which runs AFTER layout → ~1-frame lag behind `pillBottomY` during the fast IME animation → top dips ~Δ/frame then recovers. **NEXT FIX (planned): compute the open height SYNCHRONOUSLY in composition, not via the animatable.** i.e. `renderedHeightPx = if (settledOpen) maxDrawerHeight else drawerHeightAnim.value.coerceAtLeast(pillHeightPx)`, where `settledOpen` = open mode + open-anim done + no gesture. Needs a `settledOpen` flag set false at every drawerHeightAnim-driving gesture start (search drag handle ~713, both `PredictiveBackHandler`s, top drag strip ~594, panel awaitEachGesture ~463, `drawerNestedScroll`) and true when the open anim/cancel settles. `maxOf(anim,max)` won't work (breaks drag-to-close). Keep the v521 snap for `openProgress`/`showDrawerGrid` consistency. (Browser has the same bug — separate `com.hermes.browser` repo.)
+
+**v521 — pin search-box top edge on keyboard open/close.** The panel is bottom-anchored (`offset = pillBottomY - renderedHeightPx`), `pillBottomY`/`maxDrawerHeight` track the IME inset instantly, but `drawerHeightAnim` SPRINGS to the new `maxDrawerHeight` → height lags the IME → top edge dips then bounces. Fix in the height `LaunchedEffect(mode, maxDrawerHeight)`: track `prevMode`/`prevMax`; if `open && mode==prevMode && drawerHeightAnim.value >= prevMax-1f` (settled-open + pure keyboard resize) → `snapTo(maxDrawerHeight)` instead of `animateTo` → height stays in lockstep with the IME → top pinned, box grows/shrinks downward. Open/close spring + mid-open re-targeting preserved (mid-spring `value < prevMax` → still animates). NOTE: user said the browser has the same issue — that's the **separate `com.hermes.browser` project** (not this repo); same fix would apply there.
+
+**v520 — the REAL fix (advisor-guided, user-confirmed).** The blocker was the **floating pill** (Layer 2), composed over the drawer's bottom rows but faded to `alpha=0` when DrawerOpen. v518's `if (DrawerOpen) return@pointerInput` was NOT enough: **the `pointerInput` node still existed in the modifier chain and an idle node still intercepts taps.** Fix: don't apply the modifier at all — `.then(if (mode==Searching||DrawerOpen) Modifier else Modifier.pointerInput(...) { awaitEachGesture{…} })`. Also gated the pill content (`SearchPill`/`ActiveSearchField`) on `pillAlpha > 0f`. **CORRECTED LESSON: plain `Modifier.background` does NOT block taps (standard Compose). To stop an element intercepting touches, remove its `pointerInput`/`clickable` from the chain (conditional `.then`), not `return@` inside the lambda. And observe (debug `.background(Color.Red…)` + screenshot) before theorizing — this cost 4 builds (v518–v520).** (The v511/v519 draw-only fades are still fine to keep — cleaner, just weren't the fix.)
+
+**v516 — expanded search field polish.** (1) `ActiveSearchField` search icon 20dp → **28dp** to match the collapsed `SearchPill` (28dp). (2) The drag-to-close handle was a 20dp layout sibling ABOVE the field (pushed it down, extra gap vs collapsed). Now the field `Row` is wrapped in a `Box` and the handle is an **overlay** (`align(TopCenter).height(20dp)`, declared after the Row so it's on top) → zero layout height → field keeps the same gap above its text as the collapsed pill. NOTE: kept the Row's `top=8.dp`; if user still sees a mismatch, remove that to make it flush. Layout fact: when `Searching`, `pillAlpha→0` (pill hidden), so the PANEL's field (in the Searching branch) is the visible one, not the bottom pill `ActiveSearchField`.
+
+**v513 — search predictive-back + drag-to-close.** The search panel uses the same `drawerHeightAnim` as the drawer, so: (1) replaced the plain `BackHandler(Searching)` with a `PredictiveBackHandler(enabled = mode==Searching)` inside `BoxWithConstraints` that snaps `drawerHeightAnim` to `maxDrawerHeight*(1-progress)`, commits → `clearQuery()` + `Collapsed`, cancels → animate back open (direct mirror of the DrawerOpen one). Focused keeps its plain BackHandler. (2) Added a 20dp grab-handle `Box` as the FIRST child of the Searching `Column` (above the field, so it never overlaps results → no tap-blocking) with `detectVerticalDragGestures`: drag down → `drawerHeightAnim.snapTo(value-dy)`; on end, if below `(1-SWIPE_COMMIT_FRACTION)` → close (clearQuery+Collapsed) else spring back open. Reuses `scope`/`sheetSpring`/`SWIPE_COMMIT_FRACTION`.
+
+**v506–v507 — Claude cross-session auto-memory (MEMORY.md-style).** Advisor-steered: extraction (NOT a tool-loop — avoids entangling with the existing thinking + web_search paths); visible/editable store built BEFORE auto-write; off by default; no silent eviction.
+- **v506 (foundation):** `providers/ClaudeMemory.kt` `ClaudeMemoryStore` — prefs `claude_memory` (one fact/line) + `claude_memory_enabled` (default OFF). `list/raw/setRaw/clear/isFull/addAll/systemBlock`; `addAll` is `@Synchronized`, case-insensitive dedup, and **stops adding at `MAX_ENTRIES=60` instead of FIFO-evicting** stable facts (same trap class as the v486 pin-cap). `AnthropicClient.ask` injects `systemBlock(context)` into the system prompt (`listOfNotNull(baseSystem, memoryBlock, locationNote)`). Settings → Claude: Memory toggle + editable "Remembered facts (one per line)" `OutlinedTextField` + Clear button.
+- **v507 (auto-extraction):** `AnthropicClient.extractMemories(ctx, messages, existing)` — best-effort `claude-haiku-4-5` call (max_tokens 400) that's GIVEN the current memory and returns ONLY new durable facts as a JSON array (`parseFactArray` tolerates fences/stray text); returns empty on any failure. Hooked in `SearchViewModel.sendClaude.onSuccess` AFTER `ClaudeChatStore.save`, gated on `isEnabled`, in a separate `viewModelScope.launch` (never blocks the shown answer) → `ClaudeMemoryStore.addAll`. Dedup is double-layered (prompt-side semantic + store-side exact). User prunes via the editable field when full.
+
+**v530 — long-press search result → "Search Configuration" → provider's settings page (the last queued feature).** Settings deep-link: `SettingsActivity` reads `search_provider` extra → `SettingsScreen(initialProvider)` → `SearchSettingsScreen(initialProvider)` → `selected = BUILTIN_SEARCH_PROVIDERS.find{ it.limitKey==id }` (auto-opens the detail). Result side (LauncherSearchBar): `providerIdForResult(result): String?` map + `openSearchProviderSettings(ctx, id)` (`Intent(SettingsActivity){section=search, search_provider=id}`). `SearchResultRow` wraps the card in a `Box`, owns a `showConfig` `AppContextMenu("Search Configuration", Settings icon)`, passes `onConfigure={showConfig=true}` to the 7 simple cards (Contact/Dialer/Settings/SystemSettings/BrowserHistory/File/BrowserSuggestion — each: `@OptIn` + `clickable`→`combinedClickable(onLongClick=onConfigure)` + an `onConfigure` param). App/Widget cards add the item to their OWN existing `AppContextMenu` instead. **NOT covered (special/interactive cards, easy follow-up): Calculator, Ai/Gemini, Claude idle card, Plugin (null id), HomeAssistant.** UNVERIFIED on-device.
+
+**v528 — Claude "notify when answer is ready" + tap-to-reopen-chat (the v505 2nd-half TODO, DONE).** `providers/ClaudeNotifications.kt`: `notifyAnswer(ctx, sessionId, title, body)` (channel `claude_replies`, `BigTextStyle`, PendingIntent→MainActivity + extra `claude_open_session`, id=`sessionId.hashCode()`) gated on `claude_notify` pref + POST_NOTIFICATIONS; `cancel()`; `ClaudeDeepLink.pendingSessionId: MutableStateFlow<String?>`. `SearchViewModel.sendClaude.onSuccess` (after save, after the activeChat update): notify if `!(activeChat==thisSession && MainActivity.isInForeground)` — SIMPLER than the planned `chatOnScreen` flag (activeChat is cleared on collapse, and `MainActivity.isInForeground` already existed) so NO conversation-composable/call-site changes. `MainActivity.handleClaudeDeepLink(intent)` in onCreate + onNewIntent (`setIntent`, `removeExtra` so it doesn't re-fire) → sets `ClaudeDeepLink.pendingSessionId` + cancels notif. `LauncherSheet` `LaunchedEffect` collects `pendingSessionId` → `resumeClaude(ClaudeChatStore.get(id))` + `mode=Searching` + cancel + reset flow. Settings: "Notify when ready" toggle + POST_NOTIFICATIONS runtime request (mirrors location toggle). Manifest perm added. **Best-effort: dies if launcher process is killed mid-request (named, not engineered around). UNVERIFIED on-device.**
+
+**v505 — Claude thinking delegation.** Reply bar has an `IconToggleButton` (Psychology icon) → session-level `SearchViewModel.claudeThinking` flow (`toggleClaudeThinking()`); `sendClaude` passes it to `AnthropicClient.ask(..., thinking=)`. When thinking: model = `claude_thinking_model` pref (blank → main model), body adds `thinking:{type:"adaptive"}`, `max_tokens` → `THINKING_MAX_TOKENS=8192` (thinking counts against it). `parseAnswer` already drops non-text (thinking) blocks → clean final answer. Settings: new "Thinking model" field. Threaded `thinking`/`onToggleThinking` through `ClaudeConversation`→`ClaudeReplyBar` + both call sites. **STILL TODO (2nd half of request): notify when answer ready + tap-opens-chat** — advisor plan: post in `sendClaude.onSuccess` AFTER `ClaudeChatStore.save`, only when not visible (`chatOnScreen` flag in `ClaudeConversation` DisposableEffect + MainActivity resumed flag; notify if `!chatOnScreen || !resumed`); POST_NOTIFICATIONS perm + channel + settings toggle; PendingIntent→MainActivity(singleTask, handle onCreate+onNewIntent+setIntent) carrying sessionId → shared event flow HomeScreen observes → open search + `resumeClaude(ClaudeChatStore.get(id))`; best-effort (dies on process death).
+
+**v504 — HA integration search (done over REST, not WebSocket).** Typing an integration name lists its entities. `HomeAssistantClient.integrationMap(ctx)` POSTs `/api/template` with a Jinja template iterating `states`, mapping each via `config_entry_attr(config_entry_id(s.entity_id),'title'/'domain')` → `entity_id -> integration label`; cached 5min (failures cached too, keyed on `integrationCacheAt>0` so empty-map results don't retry every keystroke). `HomeAssistantProvider.query` now merges name-matches + integration-label-matches (`distinctBy{entityId}.take(12)`). Degrades gracefully (empty map) on HA without `config_entry_attr`. Area/device grouping still possible later via the same template trick (`area_name`/`device_attr`).
+
+**v502 — HA media artwork.** `HaMediaCard` now shows album art when present: `HomeAssistantClient.imageUrl(ctx, attrs["entity_picture"])` (prefixes base URL for relative `/api/...` paths) + `suspend fetchImage()` (HttpURLConnection + `BitmapFactory`, adds bearer token for same-origin URLs). Loaded via `produceState` keyed on entity_picture; shown as a 40dp rounded `Image` (Crop) in the leading slot, falling back to the MusicNote icon. No Coil (project has none).
+
+**v501 — HA alarm_control_panel + sensor/binary_sensor added.** `HaAlarmCard`: optional PIN `OutlinedTextField` (`code_format` → number/text keyboard) + contextual arm/disarm `FilledTonalButton`s from `supported_features` bits (ARM_HOME=1/AWAY=2/NIGHT=4; default home|away if absent); optimistic state (wrong-code silent no-op self-corrects next fetch). `HaSensorCard`: read-only value + `unit_of_measurement` for `sensor`/`binary_sensor`. Icons Security/Sensors; imports KeyboardType/PasswordVisualTransformation. Gotcha hit: `Modifier.padding(horizontal=, top=)` isn't a valid overload — use `padding(start=,end=,top=)`. **Open idea (not built): search an HA integration/device/area → list entities — needs the registries (`config/entity_registry/list` etc.), which are WebSocket-only (not in `/api/states`); sizeable follow-up (new WS client).**
+
+**v499 — HA input_number/number, input_select/select, vacuum, humidifier added.** Cards: `HaNumberCard` (step-snapped slider, `set_value{value}`), `HaSelectCard` (`DropdownMenu` of `attributes["options"]`, `select_option{option}` — first dropdown control), `HaVacuumCard` (start/stop/return_to_base buttons), `HaHumidifierCard` (toggle + `set_humidity{humidity}` slider). Icons: Tune/ArrowDropDown/CleaningServices/Home/WaterDrop/AutoMirrored.List. Only common domain left = `alarm_control_panel` (deferred: disarm code handling, security-sensitive). All driven off the generic `attributes` map (no data-class changes this batch).
+
+**v497 — HA climate + media_player + button/input_button added.** `HomeAssistantCard` dispatch gained `climate`→`HaClimateCard` (+/- temp stepper via `climate/set_temperature{temperature}`, HVAC modes as `FilterChip`s in a `horizontalScroll` Row via `climate/set_hvac_mode{hvac_mode}` — modes from `attributes["hvac_modes"]` parsed by `parseStringList`; state IS the mode), `media_player`→`HaMediaCard` (prev/play-pause/next `IconButton`s + volume `Slider`→`media_player/volume_set{volume_level}`; play-pause optimistically patches playing/paused), and `button`/`input_button` folded into `HaActivateCard` (service `press` vs `turn_on`). **Data-model change to stop per-domain field growth:** `HaEntity`/`HomeAssistantResult` now also carry `attributes: Map<String,String>` (all raw HA attrs stringified, arrays as JSON text) — client builds it via `attrs.keys().forEach{ attrMap[k]=attrs.get(k).toString() }`; richer cards read from it. Existing simple cards still use the typed `brightness`/`percentage`/`position`. Helpers `parseStringList`/`fmtTemp` added. New icons: Thermostat/Remove/SkipPrevious/SkipNext/Pause. **Remaining HA domains: input_number/input_select (slider/dropdown), vacuum, humidifier, alarm_control_panel.**
+
+**v495 — HA domains batch added (fan, lock, cover, scene, script).** `HomeAssistantCard` now dispatches `when(result.domain)` to sub-cards: `HaDimmableCard` (light+fan: toggle + level slider — light=`light/turn_on{brightness_pct}`, fan=`fan/set_percentage{percentage}`), `HaToggleCard` (switch/input_boolean), `HaLockCard` (lock/unlock), `HaCoverCard` (open/stop/close `IconButton`s + position slider `cover/set_cover_position{position}`), `HaActivateCard` (scene/script `FilledTonalButton`→`turn_on`). Shared `HaControlRow` + `haCall(scope,ctx,…,patchState,brightness,percentage,position,onFailure)` helper (calls service, patches cache on success, reverts on failure). `HaEntity`/`HomeAssistantResult` gained `percentage` (fan) + `position` (cover); client parses `percentage`/`current_position`; `patchCache` extended (null attr args keep cached value). Icons: Air/ToggleOn/Lock/Window/KeyboardArrowUp/KeyboardArrowDown/Stop/PlayArrow (all resolved in extended). **Remaining HA domains: climate + media_player** (need temp/mode + play/pause/volume — multiple controls).
+
+### Instance D — 2026-05-31 (Deck v484–v486: reply-bar polish, widget recents fix, Claude thread pinning)
+
+- **v484** — reply-bar gap now *measured* (`onSizeChanged` on the bar → `contentPadding` bottom = bar height + 8dp + bottomInset) instead of a guessed 128dp constant; reply bar distinguished from message bubbles (darker `surfaceContainerLow` fill, briefly an outline border too); sheet Back button (`LauncherSheet` ~658) now returns to results via `searchVm.endClaude()` when `activeChat != null`, else closes search.
+- **v485** — **removed** the reply-bar border (user: keep just the darker fill). **Widget recents fix:** recent (deserialized) `WidgetPickerResult`s carry no `appWidgetId`, so they always showed the "Long-press this app to activate" placeholder. `WidgetPickerCard` now resolves `result.appWidgetId ?: pinRepo.getPinnedWidgetIdByComponent(comp)` so a *pinned* widget renders live. ⚠️ UNCONFIRMED INTERPRETATION: user said "three widgets show up, but they all say 'Long-press…'" — could mean "render them" (what I did) OR "remove them". Asked user to confirm; if they want them gone, filter widgets out of recents instead.
+- **v486 — Claude thread pinning (per user request).** Long-press a chat message **or** a recent-chat row → "Pin thread"/"Unpin thread". Pinned threads always render at the top of the idle Claude card (above recents) with a `PushPin` icon. `ClaudeChatStore`: new `claude_pinned_sessions` pref + `pinnedIds/isPinned/setPinned/pinnedSessions`; **`save()` now partitions pinned off before the `take(MAX_SESSIONS=20)` so a pinned thread can't silently fall out of storage** (the trap the advisor flagged). Shared `ClaudeSessionRow` (combinedClickable: tap=resume, long-press=menu); `ClaudeMessageCard` gained optional `pinned`/`onTogglePin`; `ClaudeConversation` tracks `threadPinned` for `state.sessionId` via a `pinVersion` bump.
+- **QUEUED NEXT:** long-press any search *result* → "Search Configuration" popup → that provider's settings detail page. Deferred deliberately (advisor: ship contained Pin first). Needs: `providerIdForResult` map + a deep-link `SettingsActivity` extra (`section=search` + `search_provider=<id>`) threaded through `SettingsScreen`→`SearchSettingsScreen` to auto-open the detail, + per-card `combinedClickable(onLongClick)` (each card owns its tap; a wrapper can't intercept because `clickable` fires onClick on long-press release).
+
+### Instance D — 2026-05-31 (Deck v479–v483: chat layout cracked + paddings + editable system prompt + location/web search)
+
+**Chat reply-bar layout finally fixed (v479) — via screenshots + an on-screen debug readout.** After ~7 wrong attempts, added temporary borders + a `BoxWithConstraints` `maxHeight` readout overlay; the screenshot showed `maxH=428 inset=373` which revealed the user was on **`LauncherSheet`** (passes `bottomInset=imeBottomSheet`), not the DockedSearchBar, and that **both** surfaces already size their content above the keyboard. So any IME compensation I added double-counted and threw the reply bar to the top. Final design (`ClaudeConversation`): a definite-height `Box` (caller passes `Modifier.height(maxListHeight)` for the search bar / `fillMaxSize()` for the sheet — *not* `weight`, which collapses to 0 because the search-bar content passes unbounded height), a `fillMaxSize` `LazyColumn` of message cards, and the reply bar overlaid `align(BottomCenter)`. `bottomInset` = **0 on both surfaces** (they self-inset). Lesson: screenshot + measure constraints before theorizing; the missing message cards / wrong values were the real diagnostics.
+
+**Paddings (v480–v481):** reply bar internal padding bumped (`horizontal=12, vertical=10`); 16dp gap below the reply bar via `bottomInset=16.dp` from the sheet caller; **drawer-to-keyboard gap** widened to 16dp (was 5dp) only when the IME is open — `LauncherSheet` line ~289 `bottomGapPx = if (imeBottomPx > navBarPx) 16.dp else 5.dp`; message-to-reply-bar gap via `ClaudeConversation` `contentPadding` bottom `96.dp → 128.dp` (was tucking under the reply bar).
+
+**v483 — editable system prompt + location/web search:**
+- **Editable system prompt:** `AnthropicClient.systemPrompt` → public `defaultSystemPrompt(model)`; `ask` reads `claude_system_prompt` pref (blank → default). New multi-line "System prompt" field in the Claude settings page.
+- **Location-aware answers:** new `claude_use_location` pref + a Switch in Claude settings that requests `ACCESS_COARSE_LOCATION` (added to manifest) via `rememberLauncherForActivityResult`. When on, `AnthropicClient.ask` injects an approximate-location note (LocationManager last-known + `Geocoder`, coords fallback) into the system prompt **and** adds the `web_search_20260209` server tool so Claude can answer weather/nearby/current-info queries. `parseAnswer` now concatenates ALL text blocks (web search yields several). **Web search has a per-query cost; toggle is off by default.** **Unverified on-device:** location fetch, geocoding, and the web_search response path.
+- Leftover unused imports from IME debugging (`border` in LauncherSearchBar, `asPaddingValues` in LauncherSheet) — harmless warnings, can be cleaned later.
+
+---
+
+### Instance D — 2026-05-30 (earlier IME attempts, superseded by v479 above)
+**v471 — v470 was ALSO wrong; the real root cause (2nd screenshot).** Removing imePadding (v470) did NOT fix it — reply still at top, and crucially **no message cards rendered**. That's the tell: the message `LazyColumn` was **collapsing to 0 height** — the classic Compose trap that `Modifier.weight(1f)` in a Column with only a `heightIn(max=…)` (wrap-content) constraint gets **no space**, so the weighted child is 0 and the reply bar sits right under the search field. Not an IME bug at all. **Fix:** LauncherSearchBar caller passes a **definite** height so weight distributes: `Modifier.height((maxListHeight - imeBottom).coerceAtLeast(120.dp))` — definite (messages fill) and minus the keyboard inset (`imeBottom`, already computed at line ~149) so the reply bar lands above the IME, with NO imePadding. `ClaudeConversation` Column stays `weight(1f)` (fill=true) on the LazyColumn. (Sheet path keeps `fillMaxSize().imePadding()` — fillMaxSize is already definite so no collapse there.) **Three wrong attempts before this** (v465/v468 imePadding-on-bar, v470 remove-imePadding) — the missing message cards in the 2nd screenshot were the diagnostic that mattered.
+
+---
+
+### Instance D — 2026-05-31 (Deck v531: DIAGNOSTIC build for the blank-card-on-unlock bug)
+
+**Bug (KNOWN ISSUE):** on unlock, the recents/multitasking view shows **wallpaper with no card** at one end; user scrolls left to reach the real app cards. User confirmed (AskUserQuestion): it's **wallpaper, no card** (not a dark/black card) and it's **always at one end** — so this is NOT a black/secure-screenshot issue, it's a **pager/list state bug** (the screenshot/`isUniformFill` path is ruled out).
+
+**Why static reading couldn't settle it:** `AppCard` *unconditionally* paints `surfaceContainerHigh` + (screenshot OR 80dp icon), so a real `CardGroup` can never render fully invisible. Yet a `LazyRow` can't overscroll past its content. So the runtime list/scroll state is doing something not visible in source. Leading hypothesis: `refresh()` on unlock (root `getLiveTasks()` returns fewer tasks transiently) **removes the card the pager was parked on**; the list shrinks; because it's a programmatic change (not a fling/drag) `rememberSnapFlingBehavior` never re-settles and `focusEvent` only fires when *new* cards appear (not on removal-only) — so the viewport is left on the now-empty trailing region. Unconfirmed that this produces an *empty center* specifically → did NOT ship a fix this round (avoiding the guess-and-rebuild loop that cost 4 builds on the drawer-tap issue and several on the IME stutter).
+
+**What v531 ships (diagnostic ONLY):** `CardStrip.kt` — top-level `const val DEBUG_PAGER_OVERLAY = true` + a yellow on-screen overlay (sibling of the `LazyRow`, `zIndex(10f)`, `Alignment.TopStart`) reading live `lazyListState.layoutInfo`:
+`g=<groups> fvi=<firstVisibleItemIndex> off=<scrollOffset> page=<computed> / vis=<visible item indices> vp=<viewport width> / parked=<pkg at computed page or <<NONE>>>`.
+On-screen (not logcat) because the repro is at unlock with no adb attached and the user is the only observer. When it recurs, the overlay distinguishes: `vis=[]`/`parked=<<NONE>>` → pager parked past content (confirms the hypothesis → fix = clamp scroll to last valid index after list mutation); `vis=[…]` with a real `parked=` pkg → a sizing/transparency render bug instead.
+
+**NEXT:** read the overlay values the next time the blank card appears, then ship the targeted fix and **remove `DEBUG_PAGER_OVERLAY`** (flip const to false or delete the block). Built + installed `deck-v531-debug.apk`.
+
+---
+
+### Instance D — 2026-05-31 (Deck v532: finish "Search Configuration" long-press coverage)
+
+**Completes the v530 work.** v530 wired the long-press "Search Configuration" → provider settings into 7 simple cards + App + Widget menus, but four result types never passed `onConfigure`, so long-pressing them did nothing even though `SearchResultRow` already renders the `AppContextMenu` for every non-null `providerId`. Filled the gaps in `LauncherSearchBar.kt`:
+- **`CalculatorResultCard` / `AiResultCard`** — added `onConfigure` param + `@OptIn(ExperimentalFoundationApi::class)`; the `ListItem` gets `Modifier.combinedClickable(onLongClick = onConfigure) {}` **only when `onConfigure != null`** (conditional `.then`-style modifier so there's no idle interactive node when absent — per [[deck-overlay-blocks-taps]]). Empty onClick (these cards have no tap action).
+- **`HomeAssistantCard`** — wrapped the domain `when` in a `Box` with the same conditional `combinedClickable`. The interactive controls (Switch/Slider in the Ha*Card sub-rows) are deeper nodes and hit-test first, so toggling/dragging still works; only a long-press on the non-control body reaches the wrapper. No layout change (fillMaxWidth child → Box fills width as before).
+- **`ClaudeResultCard`** — added `onConfigure` param; the main "Ask Claude about …" `ListItem` changed from `Modifier.clickable { onStart }` to `combinedClickable(onClick = { onStart }, onLongClick = onConfigure)`. Reuses the `SearchResultRow`-level menu (`providerId="claude"`); does NOT touch the per-session-row pin menus (`ClaudeSessionRow` keeps its own long-press = Pin/Unpin thread). Dispatch updated: `ClaudeResultCard(result, onClaudeStart, onClaudeResume, onConfigure)`.
+- **Plugin** stays uncovered by design (`providerIdForResult` → null; plugins have no settings page).
+
+Builds clean, installed `deck-v532-debug.apk`. **User to verify on-device:** long-press a calculator result / AI answer / HA device / "Ask Claude about…" row → "Search Configuration" → opens that provider's settings detail. (Note: the v531 `DEBUG_PAGER_OVERLAY` yellow chip is still on in this build — intended, still hunting the blank-card-on-unlock bug.)
+
+---
+
+### Instance D — 2026-05-31 (Deck v533: blank-card-on-unlock REFRAMED — it's the system Overview, not Deck; debug overlay removed)
+
+**The "blank card on unlock" is NOT a Deck bug.** After shipping the v531 on-screen pager diagnostic, the user reproduced it and reported the yellow overlay **wasn't showing** — then clarified the blank "multitasking view" has **"Screenshot" and "Select" buttons at the bottom**. Those are the **Pixel Overview (`com.google.android.apps.nexuslauncher/com.android.quickstep.RecentsActivity`) action buttons** — Deck has none. Corroborated via adb: `dumpsys activity recents` showed `RecentsActivity` at the top of the stack; the overlay couldn't appear because **Deck isn't on screen during the bug — the system Overview is.** (A screenshot grabbed once the user was back in Deck showed `g=4 … parked=io.homeassistant.companion.android` and all cards rendering fine — Deck's pager/card path was never the problem.)
+
+So: on unlock the device lands on the **system Pixel Overview** instead of Deck. The blank front "card" = a secure/blank thumbnail in that Overview; the transparent Screenshot/Select buttons = an Overview rendering glitch. Real fix direction (when revisited) is the long-planned **`KEYCODE_APP_SWITCH` intercept** so Deck's card view replaces the system Overview — needs the trigger confirmed first (auto-on-unlock vs a recents key/gesture on the Clicks). **User is investigating on their end; parked for now.**
+
+**v533:** removed the temporary diagnostics — `DEBUG_PAGER_OVERLAY` const + yellow overlay block in `CardStrip.kt`, and the half-added `DEBUG_HOME_OVERLAY` const in `HomeScreen.kt`. No functional change otherwise; the v532 Search-Configuration coverage remains. Built + installed `deck-v533-debug.apk`.
+
+---
+
+### Instance D — 2026-05-31 (Deck v534–v535: HA card enhancement pass — light colour control + media rework + polish)
+
+User request: add colour control to lights, and do a pass over every HA card adding what's worthwhile (with a detailed media-card spec). All in `LauncherSearchBar.kt`; client (`HomeAssistantClient`) unchanged — every raw attribute is already exposed via `HaEntity.attributes` (stringified). Advisor reviewed the plan; its five flagged traps are all handled (noted inline).
+
+- **Light colour control (`HaDimmableCard`, lights only):** parses `supported_color_modes`. If it includes hs/rgb/rgbw/rgbww/xy → a **`HueBar`** (rainbow `Brush.horizontalGradient`, tap/drag → `light.turn_on hs_color:[hue,100]`, white-ring thumb). If it includes color_temp → a **`ColorTempBar`** (warm→white→cool, → `color_temp_kelvin`, defaults 2000–6500K when min/max absent). Bulb icon tinted with the live colour via a new optional `iconTint` param on `HaControlRow`. **Colour is held in local `var`s (`hue`/`kelvin`/`swatch`) — `patchCache` can't carry colour, so reading it back from attrs after a pick would let the 10s cache refresh snap it back** (advisor trap #2). Bars only show when on & available; both guard `size.width > 0` on first layout (trap #5). Saturation axis intentionally omitted (hue@full-sat + existing brightness slider = complete v1).
+- **Media rework (`HaMediaCard`):** 64dp rounded artwork; **title (media_title) + series (media_series_title→artist→album) + device**; **progress** shown only when `media_duration > 0` (trap #3 — radio/streams have none) — a **seek `Slider` when SUPPORT_SEEK (features & 2)**, else a `LinearProgressIndicator`, with `m:ss / m:ss` labels; **live elapsed ticks locally each second from `media_position`** (no fragile ISO `media_position_updated_at` parsing); **prominent transport** = prev (48dp) · **`FilledIconButton` play/pause (60dp)** · next (48dp), 34dp glyphs, centred; volume slider with a `VolumeUp` icon. **Play state is a local `var playing` flipped in onClick and used as the ticker key + icon source — NOT `result.state` (a snapshot that never refetches; reading it directly would freeze the icon/progress on tap)** (advisor trap #1).
+- **Polish pass:** vacuum subtitle shows `battery_level`; humidifier shows `current_humidity` as "(now X%)"; climate appends "· X% RH" when `current_humidity` present. (Toggle/lock/cover/number/select/alarm/scene/sensor left as-is — already complete.)
+- New helpers: `parseFloatList`, `fmtTime`, `kelvinToColor`. New imports: Brush, detectTapGestures, detectHorizontalDragGestures, pointerInput, IntOffset, TextOverflow, VolumeUp.
+
+Built + installed `deck-v535-debug.apk` (v534 was the colour+media-only checkpoint). **User to verify on-device** (advisor trap #4 — gesture coexistence on this now-busy card, and the v532 long-press/slider combo's first real test): (1) hue/CT drag changes colour and does NOT pop the Search-Configuration long-press menu; (2) seek slider vs volume slider don't fight; (3) media play/pause icon + progress respond to taps; (4) colour survives a few seconds (cache refresh doesn't reset it).
+
+---
+
+### Instance D — 2026-05-31 (Deck v536: media-card fixes + HA card breathing room + switch spacing)
+
+User feedback after v535. All in `LauncherSearchBar.kt`.
+- **Media progress started at 0:00 (FIXED):** v535 seeded `elapsed` from bare `attrs["media_position"]`, but many players only push that on play/seek so the REST snapshot is stale (0). Now seeds from `media_position + (now − media_position_updated_at)` while playing — parses the ISO timestamp with `java.time.OffsetDateTime.parse(...).toInstant()` (safe: **minSdk 26**, java.time present; wrapped in runCatching), clamped to duration. This is the `media_position_updated_at` parse I'd skipped in v535; it was the actual cause.
+- **Volume control removed** (user wants to see the card without it for now): dropped the volume `Row`/`Slider`, the `volume` + `off` vars, and the `VolumeUp` import (added `OffsetDateTime` in its place). Easy to restore from v535 history.
+- **Breathing room (cards felt cramped):** HA cards used 8dp horizontal padding vs the 16dp every other result `ListItem` uses. `HaControlRow` → `padding(horizontal = 16.dp, vertical = 12.dp)` (was 8/6), icon loses its extra `start=8` (row provides 16), and a `Spacer(12.dp)` now sits between the text column and the trailing control. Dispatch `Box` gets `.fillMaxWidth().padding(vertical = 4.dp)` for inter-card separation. Media/climate Columns → 16/12. Fixed the compounding that the new 16dp would have caused: Number/Alarm Columns dropped their own `horizontal=8` (→ `vertical=4`), and Alarm's PIN field/button row bumped 8→16.
+- **Switch right-spacing (user pointed at the light card):** the trailing `Switch` previously had only the row's 8dp on its right; now 16dp (row end padding) + the 12dp `Spacer` gap from the text. Applies to every `HaControlRow`-based card (toggle/lock/light/fan/humidifier/etc.).
+
+Built + installed `deck-v536-debug.apk`. **Still open / user mused about it:** possibly enlarging the media artwork (held off — wanted these first). Volume removal is provisional ("let's see how it looks").
+
+---
+
+### Instance D — 2026-05-31 (Deck v537–v539: Compose BOM upgrade to newest Material Design + squiggly media progress)
+
+User wanted the **squiggly M3 progress indicator**, which led to "switch to the newest version of Material Design" + "review everything and make sure nothing breaks."
+
+- **Compose BOM 2024.12.01 → 2026.05.01** (`gradle/libs.versions.toml`). Resolves: **material3 1.4.0** (was 1.3.1), **compose ui/foundation 1.11.2** (was ~1.7.6). Toolchain already current (AGP 8.13.2, Kotlin 2.1.0) — no Kotlin/AGP bump needed. Per advisor, **did NOT adopt `MaterialExpressiveTheme`** — standard components keep standard styling; only opted into one component would-be. **First build after the bump = decision gate: it compiled CLEAN** (the deprecated `DockedSearchBar(query=,onQueryChange=,…)` overload is still present in 1.4.0, `material-icons-extended` still resolves, compose compiler from Kotlin 2.1.0 accepts the 1.11.2 runtime). No cascade → proceeded.
+- **Native `LinearWavyProgressIndicator` is NOT in stable material3 1.4.0** — confirmed by extracting the resolved AAR: zero `Wavy` classes, and `ExperimentalMaterial3ExpressiveApi` is `internal`. It's alpha-only (material3 1.5.0-alpha). Rather than pull an alpha (conflicts with "nothing breaks"), **hand-rolled `WavyProgressIndicator`** in `LauncherSearchBar.kt` — a `Canvas` that draws a sine wave over the elapsed portion + flat track for the remainder, wave scrolls via `rememberInfiniteTransition` while `animate=playing`. Same look, stable line, fully themeable. (User linked the *Views* MDC `LinearProgressIndicator` which does have wavy — declined: would need the `com.google.android.material` dep + `AndroidView` interop in the results list.)
+- Media card now uses `WavyProgressIndicator`; **dropped the seek slider** (the wavy bar is display-only) — `canSeek`/`features`/`media_seek` removed. Seek could return later via a custom wavy *slider* if wanted.
+- **Verified by me:** clean compile; installs; Deck relaunches with **no FATAL/exception in logcat** (composes + resumes under ui/foundation 1.11.2). Could not eyeball UI — device was locked.
+- ⚠️ **NOT verified (needs user eyeball — compile-clean ≠ no visual/behavioral drift across an 18-month Compose jump):** drawer open/close animation; card-strip reorder + drag/stack gestures; search-sheet IME insets + keyboard-close stutter fix; pill tap-blocking; predictive back; HA sliders/switches/color-bars styling; the new squiggly itself. These are the tuned surfaces where a Compose-version regression would hide.
+
+Built + installed `deck-v539-debug.apk` (v537 = BOM-only gate build, v538 = failed native-wavy attempt). **Open:** media artwork enlargement still on the table; offer to switch the squiggly to the real native component if/when material3 1.5 goes stable, or to the MDC Views one.
+
+---
+
+### Instance D — 2026-05-31 (Deck v540–v546: wavy indicator tuning, media seek handle, light colour sliders, spacing revert)
+
+Rapid visual iteration on the HA media + light cards (all `LauncherSearchBar.kt`).
+- **Wavy indicator** tuned to the **M3 linear-wavy spec** (user sent the spec image): wavelength 40 (was 16→28→40), amplitude 3, stroke 4, **4dp gap** between active + track, **4dp stop dot**, height 10. Gap fix: round stroke caps were eating it (each cap reaches 2dp inward, so a 4dp centre gap → 0 visible) — track now starts `head + gap + sw` for a real visible gap. (Track colour also changed surfaceVariant → `primary @ 0.24α` so it shows on the card.)
+- **Media seek handle (user: "there should be a handle to change the timestamp… no gap"):** new `WavySeekBar` — the wavy look + a draggable **pill handle** (4×16dp) at the position, **no gap** (handle covers the junction). `detectTapGestures` + `detectHorizontalDragGestures`; `onValueChange` live-updates `elapsed`, `onValueChangeFinished` calls `media_seek`. A `seeking` flag gates the 1s ticker so it doesn't fight the drag. Only used when `supported_features & 2` (SUPPORT_SEEK); else the plain `WavyProgressIndicator`. (Brought seek back — it was dropped in v539.)
+- **Light colour/warmth → real Material `Slider`s** (user: "same style as the brightness slider"): `HueBar`/`ColorTempBar` rewritten from custom gradient `Box`es to `@OptIn(ExperimentalMaterial3Api)` `Slider`s with a custom gradient `track = { Box(...gradient...) }` + the default thumb. Fire the service on `onValueChangeFinished` (like brightness), local update on `onValueChange`. **+12dp `Spacer` between the light card's sliders** (brightness / colour / warmth).
+- **Reverted the v536 "breathing room" spacing** (user asked): `HaControlRow`, dispatch `Box`, Climate/Number/Alarm/Media padding back to pre-v536 — **but kept the switch's extra right-margin** (`end = 16.dp`, a separate earlier fix). Watch-out hit again: `padding(start=, end=, vertical=)` is **not a valid overload** — must use `start/top/end/bottom` or `horizontal/vertical`, never mix.
+
+Built + installed `deck-v546-debug.apk`. **User to verify:** seek handle drag (vs list scroll vs the v532 long-press menu), colour sliders look/behave like the brightness one, the slider gaps, and that the spacing revert looks right.
+
+### Instance D — 2026-05-31 (Deck v552: Claude agent — Phase 3a, confirmed Home Assistant actions)
+
+Phase 3 (let Claude act), turn-ending model per advisor. First action type: **Home Assistant control**.
+- `ClaudeChat.kt`: `ClaudePendingAction(id, summary, kind, params, status)`; `ClaudeChatState.pendingActions`.
+- `SearchViewModel`: `claudeTools()` now also offers `home_assistant_control` (entity_id/service/brightness_pct/summary) **only when HA is exposed + configured**. `executeClaudeTool(...,pending)` — for the action tool it does NOT execute; it records a `ClaudePendingAction` and returns "proposed for confirmation" so Claude ends its turn telling the user. `sendClaude` collects `pending` and sets `state.pendingActions` on success. `confirmClaudeAction(id)` runs it (`HomeAssistantClient.callService`, domain from entity_id) and flips status done/failed; `cancelClaudeAction(id)` → cancelled; `updateAction()` patches the live list.
+- UI: `ClaudeConversation` gained `onConfirmAction`/`onCancelAction`; renders `pendingActions` as `ClaudeActionCard`s (Confirm/Cancel → status icon ✓/✗). Wired at both call sites (LauncherSearchBar + LauncherSheet). Nothing runs until Confirm — so a backgrounding action can't kill an in-flight loop (the loop already ended).
+- **NOT yet:** app-launch / call / settings actions (next), the per-provider expose toggle UI, result cards in chat.
+- **User to verify on-device:** "turn off the bedroom lights" → Claude searches HA, proposes turn_off per matched entity → Confirm cards appear → tap Confirm → device toggles + card shows Done. Also: Cancel works; a plain question shows no action cards.
+
+Built + installed `deck-v552-debug.apk`.
+
+- **v599 — Plex per-library: split into library-labeled cards + enable/disable each library.** `PlexResult`/`PlexItem` gained `library` (from `librarySectionTitle`). `groupResults(results, plexSplitLibraries=false)`: Plex label = library name when split on, else "Plex" (handles Music & any type generically). Both callers (LauncherSheet, LauncherSearchBar) read `plex_split_libraries` pref + pass it. `PlexClient`: NEW `PlexLibrary(id,title,type)` + `libraries(ctx)` (GET `/library/sections` → Directory[]) + `disabledLibraries(ctx)` (pref `plex_disabled_libraries` Set<title>); `searchOnce` skips items whose library is disabled. Settings→Search→Plex: "Separate libraries into cards" Switch (`plex_split_libraries`) + a fetched Libraries list (LaunchedEffect on open if configured, re-fetch on Test success) with a Switch per library writing `plex_disabled_libraries`. Built + installed `deck-v599-debug.apk`. (Disabled set keyed by library TITLE — consistent between filter + split grouping.)
+
+- **v597/v598 — 16 KB-page compat fix + smart ordering default ON.** v597: user's 16 KB-page device warned "app isn't 16KB compatible" — cause was ONNX Runtime 1.19's 4 KB-aligned native libs. Bumped `onnxruntime-android` 1.19.0→**1.26.0** (1.20+ ships 16 KB-aligned `.so`). VERIFIED at ELF level (PowerShell parse of APK `lib/arm64-v8a/*.so` PT_LOAD `p_align`): libonnxruntime.so / libonnxruntime4j_jni.so now `0x4000` (16 KB). APK 58→67 MB (newer runtime libs larger). v598: per user, flipped `search_ai_rerank` default `false`→`true` in BOTH read sites (SettingsScreen toggle initial state + SearchViewModel gate) → smart ordering on for fresh installs. `deck-v598-debug.apk`. (Release ABI-splits to-do still stands — built arm64-only.)
+
+- **v596 — Smart result ordering DONE (user-confirmed "ranking better").** Stripped `RankDbg` (kept one `Log.w("SearchRanker", "embedder init failed…")` for support). Feature summary: query-based group reranker behind Settings→Search "Smart result ordering" toggle (`search_ai_rerank`, default OFF); ranks providers by lexical keyword hits + threshold-gated MiniLM semantic cosine + prior; UI slots groups in via the existing enter-animation (no late reorder, no re-animation). Files: `SearchRanker`, `MiniLmEmbedder` (ONNX), `WordPieceTokenizer`, assets `all-MiniLM-L6-v2.onnx`(21.9MB)+`minilm_vocab.txt`; `rankedGroupOrder` StateFlow → `LauncherSheet` group sort; `seenSlots` first-appearance animation guard. `deck-v596-debug.apk`. **Open release to-dos (not blocking dev):** (1) `defaultConfig.ndk.abiFilters = arm64-v8a` is dev-only-size — for release do ABI splits / add armeabi-v7a; (2) toggle default OFF (could flip on); (3) ~22 MB model is the cost.
+
+- **v595 — MiniLM WORKS; fixed the threshold.** RankDbg confirmed all-MiniLM-L6-v2 gives clean, correctly-directed, well-separated cosines (tokenizer correct): `tacos`→tandoor 0.27 vs plex 0.02; `the matrix`→plex 0.11 vs tandoor 0.01; `the`→all ≤0.02. The ONLY bug: `SEM_THRESHOLD=0.30` was calibrated for USE's inflated 0.7–0.9 scores, but MiniLM's clean scores are low-magnitude (~0.1–0.27 for a match, ≤~0.06 noise) → the boost never fired → prior (Plex #1) won. Fix: `SEM_THRESHOLD 0.30→0.08`, `SEM_WEIGHT 60→100`. `deck-v595-debug.apk`. **Verify** food→Recipes, movie→Plex; then strip `RankDbg`, and consider release ABI splits (currently arm64-only for size).
+
+- **v593/v594 — Smart ordering embedder model trials.** v593 swapped USE→MediaPipe **bert_embedder** (24.9 MB): RankDbg showed it's **nonsense** (raw MobileBERT, not similarity-tuned — "cake"→settings, "matrix"→files, scores swing per-keystroke). USE (v592) over-clustered (all 0.7–0.86, food/movie within 0.01 noise). Both MediaPipe text embedders empirically falsified. **v594: custom all-MiniLM-L6-v2 (similarity-tuned sentence-transformer) via ONNX Runtime.** Dropped MediaPipe; added `com.microsoft.onnxruntime:onnxruntime-android:1.19.0` + `defaultConfig.ndk.abiFilters += "arm64-v8a"` (single-ABI → APK 58.4 MB, smaller than BERT build). Assets: `all-MiniLM-L6-v2.onnx` (Xenova quantized, 21.9 MB) + `minilm_vocab.txt` (30522). NEW `WordPieceTokenizer.kt` (uncased BERT: clean→ws-split→lowercase+stripAccents→punct-split→greedy WordPiece ##/[UNK]→[CLS]…[SEP]) and `MiniLmEmbedder.kt` (ONNX: input_ids/attention_mask/token_type_ids gated by `session.inputNames`; mean-pool over mask; L2-normalize → 384-d unit vec; cosine = dot). `SearchRanker` uses it (descriptorEmb: FloatArray; threshold-gated `cosine≥0.30 → *60`). **Tokenizer correctness is the risk** (a bug = garbage like BERT) → validate via RankDbg: "cake"→tandoor clearly > plex with a REAL margin, "matrix"→plex > tandoor, consistent direction. If clean separation → lock + tune threshold + strip RankDbg; if garbage → tokenizer bug (add STS self-test pair to isolate).
+
+- **v592 — Smart result ordering, STAGE 2: on-device embedding semantic signal.** Bundled MediaPipe **Universal Sentence Encoder** (`app/src/main/assets/universal_sentence_encoder.tflite`, 5.8 MB) + dep `com.google.mediapipe:tasks-text:0.10.21`; `android { androidResources { noCompress += "tflite" } }`. APK 47.4 MB. `SearchRanker` now: lazy non-blocking `preload()` (own `CoroutineScope(Default)`) builds the `TextEmbedder` + embeds per-provider descriptors once; `suspend rank(context, query, ids)` embeds the query off-main, scores each provider = `lexHits*100 + (cosine≥0.30 ? cosine*60 : 0) − priorIndex`, sorts. Descriptors for plex/tandoor/home_assistant/files/settings; claude/ai/contacts/etc. get no semantic boost (stay at prior). Lexical-only until the model finishes loading (first ~query). `SearchViewModel` calls the suspend `rank(appCtx,…)` before the fan-out (≈ms). **Temporary `RankDbg` log prints per-provider cosines** — for validating/tuning `SEM_THRESHOLD` (the advisor's "eyeball cosines on ~5 NL queries" step) and to be stripped after. **Validate:** Smart ordering on, warm the model (type once), then "cake"/"tacos" → does Recipes float above Plex? Read `RankDbg` cosines to confirm + tune threshold/weights. If embedding doesn't beat lexical, ship lexical-only + drop the model (per plan).
+
+- **v591 — fix whole-list re-animation when groups reorder (regression surfaced by v590 rerank).** With Smart ordering on, a late high-rank group (Plex/Tandoor) inserting at the top changed the POSITION of already-present groups; in the plain `Column`, that reset each `EnterAnimated` `MutableTransitionState` → every group re-played the enter animation on each network group's arrival ("whole list refreshes every second / animates from the top"). **Fix (`LauncherSheet`):** a query-scoped `seenSlots = remember(query){ mutableSetOf() }`; each `key(slot){ val firstTime = remember { slot !in seenSlots }; SideEffect { seenSlots.add(slot) }; EnterAnimated(animate=firstTime){…} }`. `EnterAnimated(animate)` now starts `MutableTransitionState(!animate)` → a slot animates ONLY on genuine first appearance; any later reorder/recompose (which re-evaluates `firstTime`→false, since the slot's already in seenSlots) renders static. New group still expands in at its ranked slot and pushes siblings down smoothly; existing groups never re-animate. Also hardens refresh-in-place vs disappear/reappear. `deck-v591-debug.apk`. (Stage-2 embedding model download was paused to fix this; resume after user confirms.)
+
+- **v590 — Smart result ordering, STAGE 1 (query-based group reranker scaffold).** User exploring "small on-device AI sorts search results"; decided (AskUserQuestion): **reorder the GROUPS** (not blended list / not within-group) using **embedding similarity** as the model, bundled in APK. **Advisor reframed the core risk = reorder MOTION:** the groups worth promoting (Plex/Tandoor) arrive LAST (+8 s), so reorder-after-settle = a group jumping to top while the user reads/taps (exactly the instability they spent the session removing). **Resolution: rank from the QUERY up front (before results), not from results after settle** → the order is fixed when the query settles, so each provider's group slots into its ranked position via the EXISTING enter animation (insertion-only, no swap of on-screen groups → no snap). Decoupled via a new `rankedGroupOrder: StateFlow<List<String>>` (provider ids), separate from `_results` (trickle/carried/refresh-in-place untouched). `SearchViewModel`: sets `_rankedGroupOrder` in the collect block right after `allProviders` (gated on `search_ai_rerank` pref, default off). New `SearchRanker.rank(query, ids)` — STAGE 1 lexical: distinctive per-provider keyword sets (tandoor/plex/home_assistant/files/settings), query-token hits float a provider up (count desc), ties keep default order (stable). UI (`LauncherSheet`): `grouped = sortedBy rankedOrder.indexOf(providerIdForResult(first))`. Settings → Search: "Smart result ordering" Switch (top of header) → `search_ai_rerank`. Built + installed `deck-v590-debug.apk`. **STAGE 2 (next): bundle a real MediaPipe Text Embedder (USE/MobileBERT, ~25–40 MB), add cosine(query, cached provider-descriptor) as a semantic signal; VALIDATE it reorders better than lexical on ~5 NL queries before trusting (else ship lexical-only, drop model).** Verify stage 1: toggle on, type "recipe …" → Recipes group floats to top as it trickles in (no late jump). Removed every `SearchDbg` (SearchViewModel fan-out timing + the `t0`/per-provider/ALL-done logs) and `PlexDbg` (PlexClient resolveBase/probe/search START·OK·FAIL·ABORT/img) log, plus the now-unused `import android.util.Log` in PlexClient. No behavior change. Earlier in the session also restored device `screen_off_timeout` 600000→60000, removed stray test PNGs from project root, stopped the background logcat stream. `deck-v589-debug.apk`. Search/auto-discovery/posters/result-animation/refresh-in-place/plezy+kitshn deep-links all user-confirmed working.
+
+- **v588 — NEW Tandoor Recipes search provider (+ tap → open in kitshn).** User self-hosts Tandoor (https://tandoor.dev) and uses **kitshn** (`de.kitshn.android`, installed v2.1.0) as the client. Reverse-engineered both from kitshn source (codeload zip, GPL): **API** `GET {base}/api/recipe/?query=<q>` header `Authorization: Bearer <token>` → DRF `{count,next,previous,results:[{id,name,description,image(URL),working_time,waiting_time,rating}]}`; images need the Bearer header too. **kitshn deep link** (`AppLinkHandler.kt`): `kitshn://<instanceHost>/recipe/<id>` → recipe view, BUT only if `instanceUri.host == linkUri.host` (Deck's Tandoor URL host MUST match the instance kitshn is signed into, else kitshn shows "inaccessibleInstance" — the Plex-URL lesson). Mirrored the Plex provider across all touch points: NEW `TandoorClient.kt` (search + Bearer image fetch + `decodeSampled` downsample + host()/webUrl()), `TandoorProvider.kt` (id="tandoor", skip <2 chars, NO Plex-style auto-discovery/cancellable machinery — DRF query is light, per advisor), `SearchResult.TandoorResult(id,name,subtitle,imageUrl)`, `TandoorResultCard` + `openTandoorItem` (kitshn deep link → web `{base}/view/recipe/{id}` → open kitshn), branches in groupResults("Recipes")/providerIdForResult/resultKey(both files)/activateSearchResult/formatForAgent, registered in staticProviders (after Plex), Settings meta + "tandoor" detail branch (URL + `tda_` token + Test). Built + installed `deck-v588-debug.apk`. **User to verify:** Settings → Search → Tandoor → enter URL + API token (Tandoor→Settings→API) → Test; then search a recipe → cards w/ thumbnails; tap → opens recipe in kitshn (if "inaccessible instance", align Deck's Tandoor host to kitshn's). Note: GPL kitshn source — fine for reference. Tandoor result NOT in ClaudeChatStore codec (else→null, same as Plex).
+
+- **v586/v587 — plezy deep-link now LIVE (user installed Play Store plezy with the `plezy://play` filter); shows/seasons scoped out.** The forward-compatible link from v582 resolves now → movies/episodes play in plezy on tap. Tested widening to show/season (v586): plezy opens the player but errors **"File information not available"** — a show/season ratingKey has no media file (plezy does NOT auto-resolve the next episode from a show id). Reverted (v587) to `type == "movie" || type == "episode"`; show/season fall through to opening plezy. Possible future: Deck resolves a show's On-Deck episode (`/library/metadata/{rk}?includeOnDeck=1`) and fires the play link with the EPISODE ratingKey to resume — deferred (needs an async call on tap). `deck-v587-debug.apk`.
+
+- **v585 — stop a refreshing card from disappearing+re-animating; update it in place (user: "if a card reloads, get rid of the card, just populate the new information").** Root cause: the v576 trickle built a FRESH all-empty `partial` per query, so on each keystroke the first fast provider to return collapsed `_results` to just itself → every other group vanished, then re-appeared as it re-completed → with v583's enter animation, every group re-animated each keystroke. **Fix (`SearchViewModel`):** hoisted a `carried: LinkedHashMap<id,results>` outside the `collect`; each new query SEEDS `partial[it.id] = carried[it.id] ?: emptyList()` (not empty), each provider write also updates `carried`, and `carried.clear()` on blank query. Now the first provider updates only its own slot → other groups stay present (key alive) and just refresh their rows in place; genuinely-new providers (no carried entry) still animate in; stale results show briefly until a slow provider (Plex) re-completes (acceptable per the existing trickle intent). Main-thread-only writes, so plain map is safe. `deck-v585-debug.apk`.
+
+- **v584 — slowed the new-card enter animation** per user: `EnterAnimated` tween 220 → **420 ms** (fadeIn + expandVertically). `deck-v584-debug.apk`.
+
+- **v583 — search results: fix late results prepending ABOVE the viewport + animate groups into place (user request).** Bug: a slow high-ranked provider (Plex ranks high but loads last) had its group prepended into the results `LazyColumn`, which anchors the old top item → the new group landed above the viewport (user had to scroll up; "Ask Claude" showed at top with movies hidden above). **Fix (`LauncherSheet.kt`, Searching branch, advisor-chose approach B over LazyColumn+animateItem):** replaced the results `LazyColumn` with a `Column(verticalScroll(rememberScrollState()))` — at offset 0 a prepend reveals in place (no item-anchoring). `LaunchedEffect(query){ scrollState.scrollTo(0) }` resets to top on each new query. Each group/widget wrapped in `key("group:$label"){ EnterAnimated { … } }`; new `EnterAnimated` = `AnimatedVisibility(visibleState=remember{MutableTransitionState(false).apply{targetState=true}}, enter=fadeIn(220)+expandVertically(220), exit=None)` → group expands+fades in on FIRST appearance, pushing siblings down ("slide others out of the way"). Enter-only; per-call-site state keyed by `key(label)` so trickle updates don't re-animate and query-change doesn't re-fire all (NOT keyed by query). Tradeoff: Column composes all groups (all posters fetch at once) — fine post-transcoder/cancellable-fetch. Imports: verticalScroll, rememberScrollState, expandVertically, ExitTransition. Built + installed `deck-v583-debug.apk`. **Verify by WATCHING (not screencap): (1) movies appear without scrolling up; (2) group expands+fades rather than popping.** Note: my memory says graphicsLayer alpha is ignored in launcher window, but the pill fades via graphicsLayer alpha & works → fadeIn should render; if fade no-ops, expand alone still delivers it.
+
+- **v581/v582 — Plex item deep-link saga: official app CAN'T (RN, no movie/show route); plezy = PLAY-only + not in installed build → forward-compatible play link shipped.** v580's `plex://preplay` did NOT navigate (cold + warm tested via adb + screencap): the current Plex app is `tv.plex.app` **React Native** — decompiled `assets/index.android.bundle` (Hermes; strings readable), its React-Navigation linking config only has content routes `plex://season/.*` + `plex://episode/.+` (+ prefixes `plex://`, `https://watch.plex.tv`, `watch.plextv.dev`). **No `plex://movie/`/`plex://show/` route**, and no `preplay` → so an arbitrary movie/show can't be deep-linked into the official app. **plezy (user is trying it):** downloaded source (codeload zip) — only deep link is `plezy://play?content_id=plezy_{serverId}_{ratingKey}` where serverId = Plex **machineIdentifier** (plezy's clientIdentifier); handler `_handleWatchNextContentId` → `navigateToVideoPlayer` = **PLAYS immediately, not a detail page** (user OK'd auto-play). BUT installed plezy **1.12.0 (vc28)** has NO `plezy://play` intent-filter (only MAIN/LAUNCHER — `am start` "unable to resolve"); the deep link is in GitHub main, unreleased. **Shipped (v582, `openPlexItem(ctx, ratingKey, type)`):** for movie/episode, fire `plezy://play?content_id=plezy_<machineId>_<ratingKey>` via `setPackage("com.edde746.plezy")` → **forward-compatible** (throws today → falls back to open plezy → Plex app → web; auto-plays once plezy ships the filter). Removed `plex://preplay` + `plexMetadataType` + deep-link debug log. **Device:** bumped `screen_off_timeout` 60000→600000 for screencap testing — **RESTORE to 60000 when done**. Built + installed `deck-v582-debug.apk`. Diagnostics (`SearchDbg`/`PlexDbg`) still in — strip after user confirms search+auto-discovery+deep-link all good. Tools used: adb screencap (device was locking mid-test; lockscreen via `input keyevent KEYCODE_WAKEUP`+swipe), dumpsys package intent filters, Hermes bundle string-grep, codeload source grep.
+
+- **v580 — Plex result tap now DEEP-LINKS to the item's info page (was: just launched the app).** User wanted the result to open the movie/show page. Investigated both the official app and 3rd-party **plezy** (https://github.com/edde746/plezy) the user is considering. Findings: plezy (Flutter, `com.edde746.plezy`) registers only `plezy://play?content_id=<opaque>` (Android-TV Watch-Next PLAYBACK; content_id is internal, resolved Dart-side) — playback-only, not an "open item page" API. Official Plex app (`com.plexapp.android`, dumpsys): MainActivity handles `plex://` (scheme only, any path) + Plex's own shorteners (watch.plex.tv/l.plex.tv/links.plex.tv/a//click.plex.tv); does NOT claim app.plex.tv (so the old web fallback couldn't be intercepted). **Solution (official app, per Plex's own scheme via forum/Organizr gist):** `plex://preplay/?metadataKey=<urlenc(/library/metadata/RK)>&metadataType=<n>&server=<machineId>` → opens the preplay (info) screen. `LauncherSearchBar.openPlexItem(ctx, ratingKey, type)` now: (1) plex://preplay via `setPackage("com.plexapp.android")` (needs cachedMachineId, warmed during search); (2) fallback launch app; (3) fallback web app. Added `plexMetadataType(type)` map (movie1/show2/season3/episode4/artist8/album9/track10/collection18). Callers updated (`activateSearchResult`, `PlexResultCard`). Built + installed `deck-v580-debug.apk`. **Verify (search first so machineId is warm, then tap a movie):** should land on that item's page IN the Plex app. If it opens the app but not the item, the Android app may want a different path than iOS's `preplay` — iterate (try `metadataType` omitted, or the `server://` form). plezy deep-link is NOT a good target if user switches.
+
+- **v579 — Plex multi-URL AUTO-DISCOVERY (root cause of remaining failures = NAT hairpinning to the public IP).** v578 logs proved the settled `'Rick and morty'` connect-FAILed: `SocketTimeoutException: failed to connect to /75.25.50.119 (port 32400) from /192.168.0.79` — the phone is on the home LAN but Deck pointed at the server's PUBLIC IP, so every connect needs NAT hairpinning, which the router does unreliably (15 s timeouts). (PC connected fast only because it has a VPN iface `10.2.11.192` and routes out-and-back, not hairpin.) Not a Deck logic bug — v577 abort was working (the `Socket closed` lines). **Feature (user asked):** enter TWO server URLs; Deck races them and uses whichever connects. `PlexClient`: `configuredBases()` reads `plex_base_url` + `plex_base_url_alt`; `@Volatile activeBase`; `resolveBase()` RACES `GET /` (token-authed — proven path, NOT unverified `/identity`, per advisor) across URLs via `CompletableDeferred` (first 200 wins, losers cancelled+disconnected, `PROBE_TIMEOUT_MS=4s`); `search()`→`searchOnce()` split: on a still-`isActive` failure it clears `activeBase` and retries once (re-races) so a home↔away switch returns results, not empty — discriminates on `currentCoroutineContext().isActive` NOT exception type (aborts are `SocketException`, not `Cancellation`, per advisor). `CONNECT_TIMEOUT_MS` 15s→8s (discovery picks a reachable URL, so connect is fast; 8s only bounds a stale-URL retry). `ping()` races + reports `"<name> — using <url>"`; `imageUrl()`/`machineIdentifier()` use the resolved base. `baseUrl()` = `activeBase ?: first configured`. Settings: 2nd field "Alternate URL (optional)" → `plex_base_url_alt`; Test enabled if either URL + token. Advisor-reviewed (no Mutex needed; herd converges). Built + installed `deck-v579-debug.apk`; logcat cleared. **Verify:** (a) home wifi: enter local + remote, Test → "using http://<localIP>" fast, search works; (b) **failover test without leaving home — enter a DEAD local URL + the real remote; if Plex still returns results, the race/retry path works.** Then STRIP `SearchDbg`/`PlexDbg`.
+
+- **v578 — Plex still "shows nothing" for typed-out titles ('the pitt', SNL) — connect saturation from per-keystroke searches (found via SearchDbg + PC probe).** `the pitt` → `+8019ms plex → 0` with NO `PlexDbg search` line = the request never reached the server; it hit the **8 s connectTimeout**. Decisive PC probe: a bare `System.Net.Sockets.TcpClient.Connect("75.25.50.119",32400)` succeeds in **~130 ms** (the 5–10 s `Test-NetConnection` figure was just ICMP-ping padding). So the server/port is fast for a SINGLE socket — the phone's 8 s connect stalls only because a fast type-through opens a Plex socket PER KEYSTROKE and the burst of overlapping connections saturates the client pool / server per-IP limit. (Plex website works because it reaches the server via plex.tv relay/LAN, not the raw remote IP under burst.) Not query-specific; `'the matrix'` worked earlier only because it was tried before the backlog built up. **Fix:** (1) `PlexProvider.query` now `delay(450)` before searching — cancellable, so rapid typing drops it and only a SETTLED query opens a socket (one search, not ~5). Local providers stay on the 200 ms bar debounce. (2) `CONNECT_TIMEOUT_MS = 15_000` for `cancellableGet` (search only; images/`httpGet` keep 8 s) — headroom for the one connect if it's slow under any residual load. (3) search logging now `START` / `OK …in Nms` / `FAIL …: <Exc>: msg` / `ABORT …` to confirm on next test whether the single search connects. Built + installed `deck-v578-debug.apk`; logcat cleared (8M buffer). **Verify:** type a multi-word title that's in the library → expect ONE `search START` ~650 ms after you stop typing, then `search OK → N`. If it's `FAIL … SocketTimeoutException` even as a lone search, the remote path from the phone is the bottleneck (→ try the `plex.direct` HTTPS URL). NOTE: device floods logcat (screenshot svc) — read with `-d` soon after the search or stream to file; the 8M buffer helps.
+
+- **v577 — "Plex shows no results most of the time" — abandoned background searches starve the live query (found via SearchDbg).** After v576 decoupled the loop (cancel-no-join), superseded Plex searches keep running (blocking I/O can't be interrupted), so a long type-through spawns ~5 overlapping Plex searches that pile up and exhaust the server/connection — the CURRENT query then **connect-times-out** (`+8020ms plex → 0`, ≈ the 8 s connectTimeout) and shows nothing, even though a partial (`search 'trouble with the cu' → 1 movie`) had found it. (User's limit=3 theory was a red herring: `provider_limit_plex` only `res.take(n)`s the DISPLAYED list, never touches the network — changing it just let the backlog drain.) **Fix (`PlexClient.kt`):** made the HTTP **abort on cancellation**. New `cancellableGet()` (used by `search()`) and a watcher in `fetchImage()`: `withContext(IO){ val conn=…; val watcher = launch { try { awaitCancellation() } finally { conn.disconnect() } }; try { …blocking read… } finally { watcher.cancel(); conn.disconnect() } }`. On cancel, the watcher (separate IO thread) disconnects the socket → the blocking `responseCode`/read throws → the search stops NOW instead of background-running for up to 25 s. So only the live query holds a Plex connection → it connects and returns. `ping`/`machineIdentifier` left on plain `httpGet` (one-off, not in the typing hot path). Added imports `awaitCancellation`, `launch`. Built + installed `deck-v577-debug.apk`; logcat cleared. **Verify:** type a multi-word movie title → the settled query's Plex card appears (no 8 s connect-timeout → 0). Also re-test "saturday night live" (may simply not be in the library — confirm separately). Then strip `SearchDbg`/`PlexDbg`.
+
+- **v575/v576 — "slow to update results during a query" ROOT CAUSE found + fixed (instrumented).** v575 added `SearchDbg` timing logs to the fan-out. A real "the matrix" type-through was decisive: each `fan-out` line fired only AFTER the *previous* query's Plex search returned — e.g. `fan-out 'the matrix'` at 12:29:03.789 landed **8 ms after** `PlexDbg search 'the m' → 87 results` (which alone took ~24 s). **Root cause:** the fan-out ran inside `_query.debounce(200).collectLatest { … coroutineScope { launch { provider.query } } }`. `collectLatest` (`ChannelFlowTransformLatest`) cancels-**AND-joins** the previous block before starting the next; that block is parked in `coroutineScope` waiting on a child doing **non-interruptible blocking `HttpURLConnection` I/O** (Plex/HA), so `join()` can't complete until the old search finishes — serializing every keystroke behind the slowest provider of the prior query. Not Plex-specific (HA `+1177ms` would do it too). **Fix (v576, `SearchViewModel`):** replaced `collectLatest` with plain `collect` + a manually-tracked `var current: Job?`; on each debounced query, `current?.cancel()` (NO join) then `current = launch { …fan-out… }`. The new query's providers run immediately; the old (cancelled) block's blocking search finishes in the background and its stale write is dropped at the existing `ensureActive()`. Advisor-validated (fan-out is on Main.immediate, so `ensureActive()`→`_results=` are consecutive non-suspending stmts — no interleave/stale-write race). **Verify (instrumented):** re-type "the matrix" — consecutive `fan-out` lines must be separated only by typing pace + ~200 ms debounce, NEVER by a provider's search duration; a superseded query's late `PlexDbg search` must produce no `_results` write. Then strip `SearchDbg`/`PlexDbg`. Built + installed `deck-v576-debug.apk`; logcat cleared. **Poster thread CLOSED:** `img code=200 ok 150x225` confirms v574 transcoder works.
+
+- **v574 — Plex "only one poster loads" + contributes to "slow to update" (DIAGNOSED from PlexDbg).** Logcat of a real search was decisive: `search 'Lord of the rings' → 36 results, withThumb=36` (every result HAS a thumb — data was never the problem) but only ONE `img` log, and it was **2000×3000** — a ~6 MP / ~24 MB-decoded poster for a 38×56dp card. We were downloading full-res posters over the remote cleartext link; the first finished (+389 ms), the other 35 huge downloads were still in flight / cancelled by recomposition (cancelled fetches throw before the log line, so they never logged → looked like "one poster"). Also a prime suspect for the UI jank behind "slow to update." **Fix (`PlexClient.kt`):** (1) `imageUrl()` now routes through Plex's photo **transcoder** — `/photo/:/transcode?width=150&height=225&minSize=1&upscale=0&url=<encoded path+token>&X-Plex-Token=…` — so the SERVER downscales to thumbnail size (~10–20 KB vs ~1 MB). (2) `fetchImage()` reads bytes then `decodeSampled(bytes, 300)` with `inSampleSize` as a defensive cap if a server ignores the transcode. PlexDbg img log kept (now prints dims) to verify many small images fetch; remove once confirmed. Built + installed `deck-v574-debug.apk`; logcat cleared for a fresh verification search. **User to verify:** all posters load; whether update speed improved (if Plex is still slow to *appear*, that's the remote library-search latency / orphaned-cancelled-connection angle — a separate, deeper fix).
+
+- **v573 — tap on search pill opens the drawer instead of search (user-reported).** Repro: open app drawer → close it → tap the search bar → the drawer re-opens. Root cause in `LauncherSheet.kt`'s floating-pill gesture handler: (1) `tracking` flipped true after only **8px** of drift, so a normal tap (always drifts a few px on a dense screen) was treated as a drag; (2) the release decision `snapOpen = drawerHeightAnim.value > maxDrawerHeight * 0.35` reads the **absolute animated height**, which is still high while the close spring is mid-flight (mode is already `Collapsed` but the height hasn't reached 0). So a tap during the close window re-committed to `DrawerOpen`. **Fix:** use `viewConfiguration.touchSlop` as the drag threshold (taps no longer track → fall through to the open-search branch), and decide `snapOpen` on the user's **net drag** (`-cumDelta > max*0.35`) instead of the contaminated absolute height. Side effect (accepted): catching a half-closing drawer now needs a real ~35%-height drag to re-open, not just being above 35%. Advisor-reviewed (ruled out the "drawer parked open under Collapsed" alt via the `LaunchedEffect(mode,maxDrawerHeight)` height→0 reset). Built + installed `deck-v573-debug.apk`. **User to verify the exact repro:** fling drawer closed, immediately tap the pill → should open *search*. Tripwire: if it ever still opens the drawer (esp. after a deliberate pause), the trigger isn't mid-close residual — instrument `mode`/`drawerHeightAnim.value`/`cumDelta` at release instead of guessing.
+
+- **v572 — search "staircase" bug: stale cancelled-query results clobbering current (user: "shows T for 10s, then The, then The Matrix").** Root cause: in the trickle, each provider's `launch` does `runCatching { provider.query(q) }` then `_results.value = …`. When `collectLatest` supersedes a query, the launch is cancelled — BUT a slow provider's **blocking HttpURLConnection isn't interruptible**, so it keeps running; when it finally returns (10–25s later), `provider.query` throws `CancellationException` which **`runCatching` swallows**, and the now-stale results get written, clobbering the current query. Each old query's Plex search landed late in sequence = the staircase. **Fix:** `ensureActive()` before the result write (a cancelled/superseded launch throws there instead of writing). Also bumped Plex min query length 2 → 3 (1–2 char queries match the whole library and are pointlessly slow). (v571 diagnostics `PlexDbg` for the one-poster issue still in; tap now launches the Plex app, not browser.) Built + installed `deck-v572-debug.apk`.
+
+- **v570 — search trickle tuning + Plex slowness/posters (user follow-up).** v569's trickle regressed query *updates* (it cleared `_results` to empty on each new query → recents blanked + partial-query flashing). Fixes: (1) **removed the `_results = emptyList()` clear** — previous results stay until the new ones trickle in per-provider (the user explicitly wanted "load individually as available"). (2) Plex `httpGet` **read timeout 8s → 25s** (`SEARCH_READ_TIMEOUT_MS`) — a big remote library search was exceeding 8s → empty → needed the backspace-retry (which hit Plex's server cache); now the first search completes and trickles in. (3) Added a `PlexClient` **poster cache** (`ConcurrentHashMap`, cap 80) so images survive list recomposition/scroll and aren't refetched (addresses "only one poster loads"). Built + installed `deck-v570-debug.apk`. **Deep-link finding (dumpsys com.plexapp.android):** Plex registers schemes `plex`, `http`, `https` (AutoVerify) — but `app.plex.tv` is NOT claimed by the app (so `setPackage(plex)` threw → fell to browser). Opening a server item *in the app* would need the undocumented `plex://` item path; the web URL (browser) shows the item but needs login. Left as browser for now.
+
+- **v569 — search trickle + Plex tap fix (user-reported).** (1) **Slow search / recents linger / Plex not showing until retype** — all one cause: `SearchViewModel` used `deferred.awaitAll().flatten()`, so `_results` only updated after the SLOWEST provider (Plex searching a big library, ~seconds). Replaced with **trickle**: clear `_results` immediately on a new query, then each provider `launch`es and writes `_results = partial.values.flatten()` (LinkedHashMap keyed by provider id, pre-seeded for stable order) as it finishes — fast providers show instantly, Plex fills in when ready, no retype. (2) **Tapping a Plex result did nothing** — `PlexResultCard` ran `openPlexItem` in the card's `rememberCoroutineScope` then `onDismiss()` closed the search → card removed → scope cancelled before the network `machineIdentifier()` call finished. Fix: `openPlexItem` is now **synchronous** (uses `PlexClient.cachedMachineId()`, tries Plex app → browser → launch app); `PlexProvider.query` warms the machineId cache concurrently (`launch { machineIdentifier() }`) during search so the cached id is ready by tap time. `activateSearchResult` (Enter) uses it too. Built + installed `deck-v569-debug.apk`.
+
+- **v568 — allow cleartext HTTP (Plex/HA by IP).** User hit "Cleartext HTTP traffic to … not permitted" on a remote Plex URL (`http://IP:32400`). Added `android:usesCleartextTraffic="true"` to `<application>` in AndroidManifest — Android blocks non-HTTPS by default (API 28+). Unblocks HTTP server URLs for Plex (and local HA). **Security note:** for a REMOTE Plex server this sends the X-Plex-Token unencrypted over the internet; the secure alternative is Plex's `https://{ip-dashes}.{hash}.plex.direct:32400` URL. Built + installed `deck-v568-debug.apk`.
+
+- **v567 — Plex search provider (new).** Mirrors the HA provider pattern. New `PlexClient.kt` (raw HTTP, prefs `plex_base_url`+`plex_token`, `X-Plex-Token` header + `Accept: application/json`): `search()` via `/hubs/search?query=` → flattens `MediaContainer.Hub[].Metadata[]` to `PlexItem`s (movie/show/season/episode/artist/album/track/clip/collection), `ping()` (friendlyName), `machineIdentifier()` (cached, for deep links), `imageUrl()`/`fetchImage()` (token in query). `PlexProvider.kt` (id "plex", silent until configured). `SearchResult.PlexResult(ratingKey,title,subtitle,type,thumbUrl)`. `PlexResultCard` (poster 38×56 + title + subtitle; tap → `openPlexItem()` deep-links `https://app.plex.tv/desktop/#!/server/{machineId}/details?key=…` → Plex app or web, falls back to launching `com.plexapp.android`). Registered in `staticProviders`; added branches to every exhaustive `when` (SearchResultRow dispatch, groupResults→"Plex", providerIdForResult→"plex", resultKey ×2 [LauncherSearchBar + LauncherSheet], activateSearchResult [Enter→launch app]); `formatForAgent` → "Plex {type}: …" (so the Claude agent finds Plex media + can show_results them). Settings: `BUILTIN_SEARCH_PROVIDERS` + a `"plex"` detail branch (Server URL + X-Plex-Token + Test connection). **Minor TODO:** Plex cards aren't in the chat-persistence codec (serializeChatCard else→null) — a presented Plex card won't survive chat reopen; the open is web/app deep-link (item-jump depends on the Plex app claiming app.plex.tv). Built + installed `deck-v567-debug.apk`. **User to verify:** set URL+token, Test connection ✓, search a movie/show → poster cards → tap opens it in Plex.
+
+- **v564 — wallpaper blur didn't reliably unblur (root cause found).** `HomeScreen` drove the window blur from a `SideEffect` reading `blurFraction` (an `animateFloatAsState`). **Bug:** `blurFraction` was read ONLY inside the `SideEffect` — reads there aren't tracked as recomposition deps — so as the blur animated toward 0, `HomeScreen` never recomposed for it and the `SideEffect` didn't re-run; the radius stuck at its pre-animation value. It only "worked" when the **dim** animation (read in the body) was recomposing alongside, or when a gesture/mode-change forced a recompose (user confirmed: unblur works when swiping up home). So it was inconsistent in all scenarios (dim off → stuck). **Fix:** drive the blur via `LaunchedEffect { snapshotFlow { (blurFraction*80).roundToInt() }.distinctUntilChanged().collect { setBackgroundBlurRadius(it) } }` — snapshotFlow observes the animated value, so the blur follows every frame and reaches 0 reliably. Imports: `snapshotFlow` (already via runtime.*), `distinctUntilChanged`, `roundToInt`. Built + installed `deck-v564-debug.apk`.
+
+- **v563 — agent polish: persistence (cards/actions survive reopen + HA re-fetch).** `ChatSession` gained `cardsByMessage`/`actionsByMessage`; `ClaudeChatStore` persist/load now serialize them. New card codec in `ClaudeChat.kt`: `serializeChatCard`/`deserializeChatCard` cover HA (entity_id+state+attrs snapshot), App (pkg → re-resolve icon/label via PackageManager on load), Contact, Dialer, Settings, SystemSettings, File, BrowserHistory (others → null/skipped); actions are plain JSON (id/summary/kind/params/status). `sendClaude` saves the maps into the ChatSession; `resumeClaude` reconstructs them and calls **`refreshHaCards()`** — re-fetches `HomeAssistantClient.states()` and rebuilds any HA cards with **live** state so a reopened device card isn't stale (stale snapshot shows first, then updates). Persisted pending actions remain confirmable (params stored). Built + installed `deck-v563-debug.apk`. **User to verify:** present/act on something, close the chat, reopen from the recent-chats list → the cards are still there (HA showing current state). **Agent polish complete (interleave + cleanup + persistence).**
+
+- **v562 — agent polish: interleave + accumulate cards/actions, import cleanup.** `ClaudeChatState.resultCards`/`pendingActions` (latest-turn, bottom-anchored) → **`cardsByMessage`/`actionsByMessage: Map<Int, List<…>>`** keyed by the assistant message index. `sendClaude` adds the turn's cards/actions at `asstIndex = msgs.size-1` **accumulating** (prior turns preserved). `confirmClaudeAction`/`updateAction` now search/patch across the map values. `ClaudeConversation` renders via `messages.forEachIndexed { i, msg -> message; cardsByMessage[i]; actionsByMessage[i] }` so cards/actions appear **right after the turn that produced them** and persist within the session across turns. `msgCount` sums the maps. Removed dead imports: `border` + `IntOffset` (LauncherSearchBar, leftover from the pre-Slider HueBar/ColorTempBar), `asPaddingValues` (LauncherSheet, IME-debug leftover). **Still TODO (3rd polish item): persistence** — cards/actions are still session-only (not saved to `ClaudeChatStore`); reopening a chat shows text only. Needs SearchResult serialization (extend `serializeResult` for HA/settings) + reconstruction; HA would show a stale snapshot unless re-fetched on load. Built + installed `deck-v562-debug.apk`.
+
+- **v560 — app-leaving Claude actions (launch app / call / open settings) with Confirm.** Completes "everything actionable." Three new tools (gated on the relevant provider being exposed): `launch_app` (apps), `call_number` (contacts/dialer), `open_setting` (system_settings). All are `terminal` + record a **pending** `ClaudePendingAction` (via `proposeAction()` helper) → Confirm/Cancel card; `confirmClaudeAction` executes via intent (`getLaunchIntentForPackage` / `ACTION_DIAL tel:` / `Intent(action)`, all `NEW_TASK` off `appCtx`). `formatForAgent` now exposes `[action=…]` on Phone-setting results so Claude can pass it to `open_setting`. Tool schemas via shared `actionTool()`. System note updated: device controls run immediately, app-leaving actions confirm first. Per the advisor's turn-ending model, these run only after the loop ends (on the user's tap), so backgrounding the launcher can't kill an in-flight loop. **User to verify:** "open Chase" / "call <contact>" / "open wifi settings" → Claude offers it → Confirm card → tap → app/dialer/settings opens (and Cancel dismisses). Built + installed `deck-v560-debug.apk`.
+
+- **v559 — fix black text + show light sliders when off (user).** (1) Result cards Claude presents were rendered as raw `LazyColumn` items → inherited Compose's default `LocalContentColor` = **black** (message cards looked fine because they wrap in a `Surface`). Wrapped each result card in a `Surface(surfaceContainerHighest, RoundedCornerShape(16))` → correct content colour + a card background. (2) `HaDimmableCard` brightness/speed slider gating changed `if (on && !unavailable)` → `if (!unavailable)` so the slider shows even when off (dragging turns it on to that level — `onValueChangeFinished` already sets `on=true`); colour/warmth bars now gated `if (on && supports…)`. **Global change** (affects the search-results light card too, not just the chat). Built + installed `deck-v559-debug.apk`.
+
+- **v558 — show the card Claude interacted with (user).** When `home_assistant_control` succeeds it no longer drops a "Done" text card — it `patchCache`s the optimistic post-action state (turn_on/off, lock/unlock, open/close_cover, brightness; toggle/unknown left as-is) then adds the entity's live `SearchResult.HomeAssistantResult` (built from the patched cache) to `cards`, so the chat shows the **actual device card** (now reflecting the new state, fully interactive) under Claude's reply. Failures still show a "Failed" `ClaudeActionCard`. (When app-leaving actions land, they'll likewise show the app/contact card they acted on.) Built + installed `deck-v558-debug.apk`. **User to verify:** "turn off the bedroom lights" → reply + the bedroom-light card shown as off, and toggling it in chat works.
+
+- **v557 — Claude can present interactive result cards in chat (Phase 2).** New `show_results` tool (Claude calls it to PRESENT cards; terminal, so "show me the bedroom lights" is ~1 round-trip — text + cards in one turn). `executeClaudeTool` "show_results" runs `runExposedProviders(query).take(8)` (refactored shared helper) into a `cards` list; `sendClaude` sets `ClaudeChatState.resultCards`. `ClaudeConversation` renders `resultCards` via the **real `SearchResultRow`** between the messages and the action cards — so HA toggles/sliders, app rows, etc. are LIVE and tappable inside the chat (the user interacting directly needs no Claude-confirm). `ClaudeChat.kt` imports `SearchResult`. Cards are live-only (not persisted; replaced each turn — at the bottom, not interleaved per-message → fine for the common "show me X" case). Built + installed `deck-v557-debug.apk`. **User to verify:** "show me the bedroom lights" renders the HA cards and toggling them works; a plain question shows no cards.
+
+- **v556 — two fixes.** (1) *Claude still said "confirm" for HA actions:* the **tool description** (in `claudeTools()`) still said "shown as a confirmation card and does NOT run until they approve" — Claude parroted it. Rewrote it to "Deck runs this IMMEDIATELY — no confirmation; phrase your reply as already done." Also changed the terminal-tool blank fallback from "…confirm to run it" → "Done." (2) *Swipe-up-to-home now closes the search box:* `drawerCloseEvent` (emitted by `requestDrawerClose()` from `MainActivity.onNewIntent` on the home gesture) was **emitted but never collected** — orphaned. `LauncherSheet` now takes a `closeEvent` param (wired to `vm.drawerCloseEvent` in `HomeScreen`) and collapses to the pill (`clearQuery()` + `clearFocus()` + `mode=Collapsed`) on it. ⚠️ Relies on the home gesture re-dispatching HOME → `onNewIntent`; if a device/gesture-nav doesn't, fall back to `onUserLeaveHint`. Built + installed `deck-v556-debug.apk`.
+
+- **v555 — confirmation model changed (user): only confirm app-leaving actions.** Rule: approve only when the action would close the search bar / open an app; in-place actions run immediately. So **`home_assistant_control` now auto-executes** inside `executeClaudeTool` (runs `HomeAssistantClient.callService` inline, records a `ClaudePendingAction` with status `done`/`failed` — no Confirm buttons, the card just shows the result). System note updated ("Deck applies it immediately — confirm what you did in the same reply"). The confirm path (`confirmClaudeAction`/`cancelClaudeAction`, `status="pending"` cards with buttons) is **retained for the not-yet-built disruptive actions** (launch app / call / open settings), which WILL record pending + require a tap. Still terminal (round-trip stays cut); the HA call now adds its latency to the turn but it's fast. Built + installed `deck-v555-debug.apk`.
+
+- **v554 — per-provider "Expose to Claude/AI" toggle UI.** `SettingsScreen.SearchProviderDetailScreen` now shows an "Expose to Claude/AI" `Switch` (after Result limit, before the per-provider `when`) for every provider except `claude`/`ai` themselves. Writes `claude_expose_<limitKey>` (default true) — the exact pref `SearchViewModel.exposedProviders()` already reads. So flipping it off hides that provider from the agent's `search_deck`. Built + installed `deck-v554-debug.apk`.
+
+- **v553 — round-trip cut (speed).** Action tools are now **terminal**: `ask` gained `terminalTools: Set<String>`; when a tool round contains a terminal tool (`home_assistant_control`), the loop runs the tool (records the pending action) then **ends the turn using that round's text** instead of doing the extra continuation round-trip. So an action command is ~2 API round-trips (search → propose+reply) instead of 3. System tool-note instructs Claude to include its one-sentence confirmation in the SAME reply as the action call; fallback text if blank. Read tools (`search_deck`) still loop. **User to verify:** action commands feel faster and Claude's reply still reads naturally (not the fallback). Built + installed `deck-v553-debug.apk`.
+
+---
+
+### Instance D — 2026-05-31 (Deck v551: Claude response streaming)
+
+User asked to speed up Claude; chose **streaming** (also switched the model to Sonnet 4.6 themselves — faster + streams fine). Advisor-vetted.
+- `AnthropicClient.ask` gained `onText: ((String)->Unit)?`. New `streamMessages()` does `stream:true` + SSE parsing: switches on the **data payload's `type`** (not the `event:` line), accumulates per-index content blocks (`text_delta`→text+`onText(roundText)`, `tool_use` `input_json_delta`→json buffer parsed at block end), reads `stop_reason` from `message_delta`, `input_tokens` from `message_start` + `output_tokens` from `message_delta`; reconstructs a `{content,stop_reason,usage}` root so the tool loop stays uniform. **Non-2xx is a JSON error body, not SSE** — `responseCode` checked first → `parseError`. Mid-stream `type=="error"` throws.
+- **Streams only when `thinking==false`** (advisor catch #1): a thinking turn carries `thinking`+`signature` blocks that must be echoed verbatim on a tool continuation, which delta-reconstruction can't reproduce → would 400. Thinking keeps the verbatim non-streaming path (and it's the slow path we're not optimizing).
+- `ClaudeChatState.streamingText: String?`; `SearchViewModel.sendClaude` passes `onText` → updates it live (guarded to the active session; cleared on success/failure). `ClaudeConversation` renders `streamingText` as the live assistant bubble (spinner before first token / during a tool round), auto-scrolls on `streamingText` changes. Per-round reset means the final round's text == the stored answer.
+- **User to verify on-device (clean build ≠ working stream):** (a) plain question streams token-by-token; (b) device question — tool round behaves, final answer streams; (c) **no 400s**, esp. **thinking ON + device question** (the verbatim-echo path); (d) the saved message matches what streamed.
+
+Built + installed `deck-v551-debug.apk`.
+
+---
+
+### Instance D — 2026-05-31 (Deck v549: Claude agent — Phase 1, read access via `search_deck` tool)
+
+User wants Claude (the in-app provider) to **read Deck's search-result content, act on it (confirm every action), show result cards in chat, and have a per-provider "expose to Claude" toggle.** Advisor-vetted plan: **turn-ending action model** (NOT a loop that suspends mid-flight for confirmation — fragile in a launcher; `launch_app`/`call_number` background the app = the loop dies; and "confirm every action" cancels the autonomous-chaining benefit anyway). **Phased:** (1) read access [this build], (2) show cards in chat, (3) confirmed actions.
+
+**Phase 1 (v549):**
+- `AnthropicClient.ask(...)` gained `tools: List<JSONObject>?` + `executeTool: suspend (name, input) -> String` and a real **tool-use loop** (cap `MAX_TOOL_ITERATIONS=6`): on `stop_reason=="tool_use"`, echoes the assistant turn **verbatim** (text + `tool_use` blocks with ids), then sends ONE user message with **all** `tool_result`s (matching `tool_use_id` — partial = 400), repeats until a final text answer. Usage summed across rounds. POST extracted to `postMessages()`. System prompt gains a tool note when tools present. Web-search server tool still added when location is on.
+- `SearchViewModel`: `claudeTools()` (the `search_deck` schema, null when nothing exposed), `executeClaudeTool()`, `searchForAgent(query)` (runs **exposed** providers in parallel, formats matches with exact identifiers — `package=`, `entity_id=`, `phone=` — + HA live state), `formatForAgent()`. `exposedProviders()` filters on `claude_expose_<id>` pref (**default true**) and excludes the ai/claude providers. `sendClaude` now passes the tools. Auto-memory + notify still key off the **final** answer (loop returns once), so no mid-loop firing.
+- **NOT yet built (next phases):** the per-provider toggle **UI** (pref `claude_expose_<id>` is read but no Settings switch yet — defaults all-on), showing result **cards** in chat, and **actions**. ChatMessage stays text-only → a tool-using turn resumes approximately from storage (final text only); acceptable, noted.
+- **User to verify on-device (clean build ≠ working agent loop):** open a Claude chat and ask something about the device — "is the bedroom light on?", "do I have the Chase app?", "what's my wifi setting?" — Claude should call `search_deck` and answer from live data. Watch for 400s (protocol) and that plain questions ("capital of France") still answer in one shot without calling the tool.
+
+Built + installed `deck-v549-debug.apk`.
+
+---
+
+- **v547 — colour/warmth sliders matched to the brightness slider exactly.** v546's gradient track was a 10dp continuous `Box` (wrong height, no thumb gap, default-coloured thumb). Pulled the real M3 1.4 `SliderTokens` values (via GitHub source): **InactiveTrackHeight/ActiveTrackHeight 16dp, HandleWidth 4dp, HandleHeight 44dp**. New `GradientTrack(frac, colors)` Canvas: 16dp tall, full-width gradient brush (`startX=0,endX=w` so it stays continuous), drawn as two rounded segments with an **8dp cut around the thumb** (2dp thumb half + 6dp gap each side) = the default split-track look. Thumb left as the default (so dimensions match) but **tinted to the current value** via `SliderDefaults.colors(thumbColor = Color.hsv(hue,1,1)` / `kelvinToColor(kelvin))`. Built + installed `deck-v547-debug.apk`.
+
+---
+
+### Instance A — 2026-06-01 (Symfonium music search provider — v607)
+
+User asked whether Symfonium could be a search provider, then whether a tap could play the song AND open Symfonium's now-playing screen. Both shipped and verified on-device.
+
+**Spike first (the unknowns were: does Symfonium accept a 3rd-party client, can we search, can we play).** Proven on-device via a throwaway MediaBrowserCompat spike: Symfonium exposes `app.symfonik.core.playback.service.PlayerService`, hands us root `auto_root` (browse: Home/Recent/Library/Favorites), `search()` returns playable songs (mediaId `song/<id>`), and a MediaControllerCompat built from `browser.sessionToken` + `playFromMediaId` drives state to PLAYING(3). No account/token — Symfonium just needs to be installed; it treats us as a full Auto-class controller.
+
+**Provider (mirrors PlexClient/TandoorClient singletons):**
+- `providers/SymfoniumClient.kt` (new): `isInstalled()`; `connected(ctx)` — main-thread connect via `withContext(Dispatchers.Main.immediate)`, serialized by a Mutex, awaits a CompletableDeferred from the ConnectionCallback, reuses while isConnected, nulls on onConnectionSuspended. `search()` — suspendCancellableCoroutine around `browser.search()`, keeps only isPlayable items, maps to SymfoniumItem(mediaId,title,subtitle,artUri), caps MAX_RESULTS=8. `play()` — fire-and-forget on a Main scope: playFromMediaId, then `openNowPlaying()`. `fetchArt()` — loads `description.iconUri` (content://) on IO; art DID load on-device.
+- `providers/SymfoniumProvider.kt` (new): id="symfonium", skip <2 chars / not installed.
+- `SearchResult.SymfoniumResult(mediaId,title,subtitle,artUri)`; wired every exhaustive `when` (SearchResultRow -> SymfoniumResultCard, groupResults -> "Music", providerIdForResult, both resultKey()s, formatForAgent). SymfoniumResultCard = Tandoor-style ListItem, Icons.Default.MusicNote fallback. Registered SymfoniumProvider(appCtx) in SearchViewModel.factory. SearchProviderMeta("symfonium",...) added (generic detail page = enable toggle + result limit, no config needed). SearchRanker got symfonium keywords + descriptor so smart-ordering boosts it on music queries.
+
+**Tap -> play + now-playing screen (the gotcha):** the session's `sessionActivity` PendingIntent is the canonical "open now playing" intent (what the notification taps). Calling `sa.send()` returned sendOk=true but Symfonium never came to the foreground — Android 14+ Background Activity Launch silently drops the launch because the foreground sender didn't grant the PendingIntent permission to start an activity from the background. Fix: on API>=34 send with `ActivityOptions.makeBasic().setPendingIntentBackgroundActivityStartMode(MODE_BACKGROUND_ACTIVITY_START_ALLOWED).toBundle()`. Then Symfonium lands directly on its full now-playing UI (verified: tap "Baby Blue" -> playing + player screen). Falls back to the launcher entry if sessionActivity is null or send throws. (Reusable lesson for any future "launch another app's specific screen via its PendingIntent" — e.g. the planned media/browser providers.)
+
+Removed the temp SymfoniumSpike.kt + its SearchViewModel.init call. Build + installed deck-v607-debug.apk.
+
+### Instance A — 2026-06-01 (Symfonium albums + artists — v609, addendum to v607)
+
+Symfonium's `MediaBrowserCompat.search()` returns songs plus album/artist containers, distinguished by mediaId prefix: `song/<id>` (playable), `browse_album_songs/<id>` (album, browsable), `browse_albums_artists/<id>` (artist, browsable). v609 un-filters the containers: SymfoniumItem/SymfoniumResult gained a `type` ("song"/"album"/"artist"); search() returns a variety-balanced cap (songs + up to 2 albums + 1 artist). SymfoniumResultCard renders by type — album art + "Album · artist" label (square), artist + "Artist" label (circular avatar), song unchanged.
+
+**Confirmed on-device:** tapping an album/artist → `playFromMediaId` on the container is a NO-OP for playback; only the openNowPlaying side-effect fires, so it just opens the Symfonium app. User: "fine for now." Only songs actually play. To play a container later, browse it (subscribe) and play the first child track. Build + installed deck-v609-debug.apk.
+
+### Instance A — 2026-06-01 (Transistor internet-radio search provider — v611)
+
+Second MediaBrowser-based provider (after Symfonium). Found via `adb shell cmd package query-services -a android.media.browse.MediaBrowserService` — that lists every installed app exposing a MediaBrowserService (Symfonium-style candidates). Transistor (`org.y20k.transistor`, PlayerService) was the pick.
+
+Spike findings (on-device): CONNECTS as a 3rd-party client (root `__ROOT__`); browse root returns the user's SAVED STATIONS (playable, UUID mediaIds — e.g. BBC Radio 1-6, KCMP, KUT, WUIS); playFromMediaId(uuid) → PLAYING(3). **Crucial difference from Symfonium: Transistor does NOT implement search()** (no result, no error — onSearch unimplemented). So "radio search" = browse `__ROOT__` once + local title filter.
+
+Implementation (mirrors SymfoniumClient): `TransistorClient` — connected() via Mutex + Main dispatcher; `stations()` browses root via `subscribe` wrapped in suspendCancellableCoroutine (unsubscribe + resume-once on first onChildrenLoaded), cached 15s so typing doesn't re-browse; `search()` = stations().filter{title contains q}; `play()` = playFromMediaId + the same Android-14+ BAL now-playing launch (ActivityOptions MODE_BACKGROUND_ACTIVITY_START_ALLOWED on sessionActivity.send, launcher fallback). `TransistorProvider` (id="transistor", skip <2 / not installed), `SearchResult.TransistorResult(mediaId,title,artUri)`, group label "Radio", Icons.Default.Radio fallback, SearchProviderMeta + ranker keywords/descriptor, all exhaustive whens. Registered in SearchViewModel.factory.
+
+**Verified on-device (v611):** search "radio" → Radio group ranked first with all 6 BBC stations; tapping → station plays (PLAYING(3)) + Transistor opens to its now-playing. Note Transistor's UI is a station list + bottom now-playing bar (not a full-screen player like Symfonium) — that's its own sessionActivity.
+
+Side note: frequent `installDebug` reinstalls keep disabling Deck's ScreenshotAccessibilityService, popping the "accessibility disabled" nudge. Re-enabled it via `adb shell settings put secure enabled_accessibility_services com.hermes.deck/com.hermes.deck.service.ScreenshotAccessibilityService` + `accessibility_enabled 1`. Build + installed deck-v611-debug.apk.
+
+### Instance A — 2026-06-01 (Transistor station artwork fix — v613)
+
+v611 showed the generic radio icon because TransistorClient read MediaDescriptionCompat.iconUri (null for Transistor). Diagnostic showed Transistor ships station art as **iconBitmap** (embedded Bitmap; iconUri null, mediaUri = the stream URL, extras has ORIGINAL_ARTWORK_URI). Switched Station.art / TransistorResult.art to carry `it.description.iconBitmap` directly (no fetch); card renders it. Dropped TransistorClient.fetchArt. Verified: BBC Radio 1-6 logos now render. Lesson: art delivery differs per app — Symfonium uses iconUri (content://), Transistor uses iconBitmap; check both. deck-v613-debug.apk.
+
+### Instance A — 2026-06-01 (Plex per-library result limits — v616)
+
+When Plex libraries are split into their own cards (plex_split_libraries), each library can now have its OWN result cap, instead of one combined provider_limit_plex for all Plex results.
+
+- Pref `plex_limit_<libraryTitle>` (Int, 0 = All/unlimited), keyed on the same label groupResults uses (librarySectionTitle, else "Plex").
+- PlexProvider applies the per-library caps when split is on: groups results by library and keeps the first N of each (HashMap counter, preserves order). When split is OFF, behavior unchanged (SearchViewModel applies the single combined cap).
+- SearchViewModel: skips the generic provider_limit_plex cap for "plex" when plex_split_libraries is on (else it would re-truncate the merged list on top of the per-library caps).
+- SettingsScreen: `plexSplitLibs` lifted to the top-level detail state so the shared "Result limit" slider can hide itself for Plex when split is on (per-library sliders replace it). Each enabled library row gets a "Show up to" Slider (same discrete 0..8/steps 7 semantics as the combined one; 0 shows "All"), written to plex_limit_<title>; only shown for enabled libraries in split mode. Disabled libraries / non-split mode unchanged.
+
+Verified on-device: split on, Movies + TV both = 3 -> search "star" gave exactly 3 movies and 3 TV results in their respective cards. UI iterated per user feedback: steppers -> sliders, removed 8dp side inset so the slider is full-width like the combined one, added 6dp top padding above "Show up to". deck-v616-debug.apk.
+
+NOTE: every installDebug reinstall disables Deck's ScreenshotAccessibilityService and pops the "accessibility disabled" nudge. Re-enable via: adb shell settings put secure enabled_accessibility_services com.hermes.deck/com.hermes.deck.service.ScreenshotAccessibilityService ; adb shell settings put secure accessibility_enabled 1
+
+### Instance A — 2026-06-01 (Fix: "Hide Deck from cards" off didn't surface Deck; show Settings card, not the launcher)
+
+Bug: "Hide Deck from cards" (pref hide_self_from_cards, default true) was gated in ONE place (HomeViewModel filter) but Deck was excluded in THREE: RecentAppsRepository line 38 (unconditional it.key != packageName), LivePreviewRepository.parseRecentTasks line 122 (unconditional pkg == packageName skip), and the gated HomeViewModel:262. With root active, the live-task filter (HomeViewModel:231) drops anything not in getLiveTasks(), so the repo + live-task exclusions removed Deck before the setting-aware check ever saw it. Advisor-confirmed plain bug.
+
+Fixes:
+- RecentAppsRepository: exclude self only when hide_self_from_cards is true.
+- LivePreviewRepository.parseRecentTasks: never include the launcher's own HOME activity (component endsWith "MainActivity" -> always skip), but include Deck's OTHER activities (e.g. the Settings activity, which has its own LAUNCHER alias and runs as its own task) unless hideSelf. This was the user's actual ask: they wanted Deck *Settings* as a resumable card, NOT a card for the launcher home itself.
+- HomeViewModel: subtract selfPackageName from multiTaskPkgs so Deck can never expand into 2 cards (home + standard).
+- HomeScreen card tap: added a `pkg == context.packageName` branch. moveTaskToFront(taskId) does nothing because Deck's Settings task usually has Activities=[] (destroyed once backgrounded), and getLaunchIntentForPackage resolves to the HOME activity. Instead, query Deck's LAUNCHER activities, pick the non-".MainActivity" one (Settings), and startActivity it with NEW_TASK|RESET_TASK_IF_NEEDED — resumes or relaunches regardless of task liveness.
+
+Verified on-device: hide_self off + Settings opened -> single Deck card; tapping it -> topResumedActivity = com.hermes.deck/.ui.settings.SettingsActivity. Default (on) unchanged. Note: card is labeled "Deck" (package label) with whatever Deck screenshot was last captured; per-activity label/thumb would need more plumbing (deferred unless asked). deck-vNNN-debug.apk.
+
+### Instance A — 2026-06-03 (Browser tabs persist across Deck restart — 3-part fix, Deck v629 + Browser)
+
+CROSS-APP fix for "browser tabs don't persist in Deck / tapping a stale card closes it." Root cause (diagnosed by main agent, confirmed): Deck tracked browser-tab cards in memory only, seeded by one-time TAB_OPENED broadcasts. Browser tabs are `excludeFromRecents` Activity tasks, so Deck's UsageStats `refresh()` can't rediscover them — any deck rebuild / Deck process restart lost them. ScreenshotCache was also in-memory only, so restored cards would show a blank frame.
+
+**Part 1 — Deck-side persistence (HomeViewModel.kt).** New StringSet pref `browser_tabs`, entries `"taskId|parent"` (parent may be empty). Added `loadPersistedBrowserTabs()` (parse, skip malformed via `toIntOrNull`), `persistBrowserTab(taskId,parent)` (copies the read-only prefs set via `toMutableSet()`, removes any existing entry for that taskId, adds, writes back), `unpersistBrowserTab(taskId)`. `persistBrowserTab` is called at the end of `events.collect` (so every added tab card is durable); restore replays each persisted tab through `BrowserTabEventBus.emit(NewTabEvent(...))` after a 150ms init delay; `tabGone.collect` unpersists. `PREF_BROWSER_TABS` lives in the companion (const val can't sit in the class body).
+
+**Part 2 — reconcile against the browser's live tasks.** Deck can't query another app's tasks, so the Browser is the authority.
+- BROWSER (new `EnumerateTabsReceiver.kt`, exported, registered in manifest for `com.hermes.browser.ACTION_ENUMERATE_TABS`): reads `(ACTIVITY_SERVICE as ActivityManager).appTasks`, keeps tasks whose `taskInfo.baseIntent.component` (fallback `topActivity`) className == `BrowserTabActivity`, replies with a single `com.hermes.deck.ACTION_BROWSER_TABS_LIST` broadcast carrying int[] `task_ids` (+ a parallel String[] `task_urls` for future titles), `setPackage("com.hermes.deck")`. (Same proven `appTasks` path ReopenTabActivity already uses.)
+- DECK: `BrowserTabReceiver` routes `ACTION_TABS_LIST` (handled before the single-task_id guard) to new `BrowserTabEventBus.emitTabsList(IntArray)`; manifest gains the action intent-filter. After the restore replay, HomeViewModel sends the enumerate broadcast to `com.hermes.browser` (`requestBrowserTabsEnumeration()`, wrapped in runCatching). `reconcileBrowserTabs(liveIds)`: drops + unpersists any browser-tab card whose taskId isn't in the live list (non-browser cards untouched), then re-adds (via NewTabEvent) any live taskId Deck has no card for. Browser not installed / no reply => collector never fires => optimistic cards stand, no crash.
+- **Standalone-dead-tab race fix (advisor catch):** a restored *standalone* tab persists parent=`com.hermes.browser` (resolvedParent falls back to pkg), so its replay runs the 2s UsageStats parent heuristic and can land AFTER reconcile already ran with an empty live list — dead card would linger. Added `isRestore` to NewTabEvent + `@Volatile tabsEnumerated`/`liveTabIds` set at the top of reconcile. `events.collect` checks the known-dead condition in TWO places: at the top (cheap, skips the wasted 2s delay for tabs already known dead when dequeued) AND again after the parent heuristic / right before the state update (the load-bearing one: the FIRST slow standalone restore is dequeued BEFORE the enumerate reply lands, so the top check sees tabsEnumerated=false and waits out the delay; by the time the delay ends the reply may have reported it dead). Genuine live TAB_OPENED is `isRestore=false` => never affected; reconcile's own re-adds carry `isRestore=true` but their taskId IS in liveTabIds so they're never dropped.
+
+**Part 3 — disk-persist screenshots (ScreenshotCache.kt).** Cache is now backed by `cacheDir/screenshots/`. `put()` also writes a PNG off-main (ioScope, Dispatchers.IO); `remove()`/`clear()` delete the file(s) too (so a stale secure/uniform-fill shot doesn't reload). On-disk set bounded to 20 files, evicted oldest by lastModified. `get()`/`getEntry()` stay PURE in-memory reads (AppCard calls them in a `remember{}` on the main thread). Instead, `init(appContext)` (idempotent) kicks a one-time off-main preload of all on-disk shots into the memory LRU and bumps `revision` so already-composed cards recompose into view. Filenames use a **reversible** sanitize `':'<->'~'` (tilde can't appear in a package name or numeric taskId; a lossy `_` sub would break since package names contain `_`). There is NO Application subclass (the `<application>` tag has no `android:name`), so `init()` is called from BOTH `MainActivity.onCreate` and `ScreenshotAccessibilityService.onCreate` (either may be the first entry point); a `put()` before init just skips disk. HomeViewModel gained an `appContext` ctor param (threaded through the factory) for the enumerate broadcast.
+
+**Files changed.** Deck: `service/BrowserTabEventBus.kt`, `service/BrowserTabReceiver.kt`, `ui/home/HomeViewModel.kt`, `data/ScreenshotCache.kt`, `MainActivity.kt`, `service/ScreenshotAccessibilityService.kt`, `AndroidManifest.xml`. Browser: new `EnumerateTabsReceiver.kt`, `AndroidManifest.xml`.
+
+**Build.** Both compile clean: `deck-v630-debug.apk` + Browser `app-debug.apk` (assembleDebug, arm64-v8a). **On-device: UNVERIFIED — adb invocation is blocked at the permission layer in this environment (every `adb.exe` call denied; plain Bash works), so I could not install or run the device scenarios.** Handoff to test: install both, re-enable the a11y service (`settings put secure enabled_accessibility_services com.hermes.deck/com.hermes.deck.service.ScreenshotAccessibilityService` + `accessibility_enabled 1`), then (a) open 2 tabs, force-stop Deck only, relaunch => cards survive WITH previews (Parts 1+3); (b) force-stop Deck AND browser, relaunch Deck => dead cards dropped + unpersisted (Part 2 — standalone-tab drop is the case to watch, covered by the isRestore guard). deck-v630-debug.apk.
+
+---
+
+### Instance A (main conversation) — 2026-06-04 (browser multi-tab: 2nd tab card wouldn't open)
+
+**Bug (user):** one browser tab → tapping its card opens it. Open a SECOND tab and tapping a card no longer opens anything.
+
+**Root cause (measured via DeckStack logcat):** in `HomeViewModel.events.collect` the grouping merged the 2nd browser tab INTO the 1st tab's card because they share `pkg=com.hermes.browser` — via the `?: groups.indexOfFirst { contains pkg }` fallback (when `resolvedParent != pkg`) AND the `else` branch (when `resolvedParent == pkg`). Two tabs → one `CardGroup.stack` → `onGroupTap` on a stack EXPANDS instead of launching → "won't open." Logs: tab1 `Stack idx=-1 Added standalone`, tab2 `Stack idx=1` (merged).
+
+**Fix (HomeViewModel.kt, the idx computation in events.collect ~line 174):** browser tabs each get their own card — only merge with a real parent-app card (`parentIdx >= 0`, e.g. a tab opened from Gmail), never with sibling browser tabs. Added `val isBrowserTab = pkg == BrowserTabReceiver.BROWSER_PACKAGE`; when no parent-app card is found, browser tabs return `idx = -1` (standalone) instead of the same-pkg fallback. Non-browser grouping unchanged. (Coexists with the 2026-06-03 persistence 3-part fix above — different code in the same collect block; my edit applied cleanly on top.)
+
+**Verified on phone (deck-v634):** 2 tabs → BOTH `Added standalone` (separate cards); tap → `DeckTap reopen tab via trampoline` → `topResumedActivity = BrowserTabActivity` (opens).
+
+---
+
+### Instance A (main conversation) — 2026-06-04 (browser: "can't reopen tabs after opening two" — task reaping)
+
+**Bug (user):** after opening a 2nd tab, neither tab card reopens. "Both cards still there, neither opens, only the word in the search bar changes."
+
+**Root cause (MEASURED, not guessed — logcat + dumpsys):** backgrounded browser-tab tasks were `excludeFromRecents="true"` document tasks, which the **system reaps**. Proof on phone: `TasksRepository` (owner = `com.google.android.apps.nexuslauncher`) logged `removeTasks: [2047]` BEFORE the user tapped that tab; `dumpsys activity activities` then showed the tab tasks GONE (only an empty `#1976 sz=0` shell left). The Deck card still held the dead `taskId`; `ReopenTabActivity`'s `moveTaskToFront(deadTaskId)` does NOT throw → silent no-op → no Toast, no `TAB_GONE` → card lingers, Deck just resumes (search-bar placeholder cycles).
+
+**Fix (Browser-only, no Deck code change):** removed `excludeFromRecents` from `BrowserTabActivity` — manifest attr AND the `FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS` intent flag in `BrowserTabActivity.onNewTab` (~line 212). A normal recents task RECORD persists across process death (browser already does `restoreState()`/`loadUrl` on the empty shell), so `moveTaskToFront(taskId)` stays durable and `getAppTasks()` becomes reliable. taskIds are stable across process death → existing Deck cards keep matching, so NO Deck change needed.
+
+**Verified on EMULATOR (emulator-5554, API 37):** opened 2 tabs (#126, #127) → `am kill com.hermes.browser` (forced process death = the reap scenario) → BOTH task records SURVIVED in `dumpsys activity recents` AND the WM hierarchy (`visible=false sz=1`, restorable). Old build = task removed entirely. Browser `app-debug.apk` installed on phone (user approved the one tradeoff: tabs now ALSO appear in system recents).
+
+**ACTIVE next (user pivot 2026-06-04):** "I want the native recents and Deck to show the same cards." Now that tabs aren't excluded, browser tabs show in BOTH surfaces. Scope being clarified — note the hard constraint: a third-party launcher CANNOT read the full system recents task list (the reason Deck uses UsageStats + screenshots + cooperative broadcasts), so a true 1:1 mirror of arbitrary apps is infeasible; browser-tab parity (cooperative app) IS achievable.
+
+---
+
+### Instance A (main conversation) — 2026-06-04 (browser tabs ⇄ native recents in sync) — deck-v636 + Browser app-debug
+
+User chose scope = **browser tabs in sync** (not a whole-system mirror). Built on C's existing reconcile machinery (`reconcileBrowserTabs`, `EnumerateTabsReceiver`, `tabsList`/`tabGone` event bus). Two coupled directions:
+
+**Direction A — native recents → Deck (tab closed/swiped there ⇒ its Deck card disappears).** `MainActivity.onResume` now calls new `HomeViewModel.syncBrowserTabs()` → `requestBrowserTabsEnumeration()` → reconcile. **Guarded by `tabsEnumerated`** (skip until the init enumerate ran once) so a resume during startup can't race the 150ms restore replay into dup cards. Also hardened the standalone-add path in `events.collect` (idx<0) to be **idempotent** (skip if a card for that exact taskId already exists) — belt-and-suspenders against any double NewTabEvent.
+
+**Direction B — Deck → native recents (dismiss a tab card ⇒ tab leaves recents).** REQUIRED, not optional: without it, Direction A's reconcile re-adds the dismissed card from the still-live task. New Browser `CloseTabReceiver` (ACTION_CLOSE_TAB + task_id → getAppTasks → finishAndRemoveTask). `HomeViewModel.dismissGroup` now, for each browser-tab app, calls `closeBrowserTab(taskId)` + `unpersistBrowserTab(taskId)`.
+
+**Also:** `RecentAppsRepository.getRecentApps` now **excludes `BROWSER_PACKAGE`** — the browser was appearing as a monolithic UsageStats app-card (taskId=-1) on top of the tab cards, which native recents has no equivalent of. Browser is now represented ONLY by its broadcast-driven tab cards.
+
+**Files.** Browser: new `CloseTabReceiver.kt` + manifest receiver; `EnumerateTabsReceiver.kt` (+EnumTabs diagnostic log); manifest (dropped `excludeFromRecents` on BrowserTabActivity, see prior entry); `BrowserTabActivity.kt` (dropped FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS). Deck: `MainActivity.kt` (onResume → syncBrowserTabs), `HomeViewModel.kt` (syncBrowserTabs + idempotent standalone-add + dismissGroup close/unpersist + closeBrowserTab helper), `BrowserTabReceiver.kt` (ACTION_CLOSE_TAB const), `data/RecentAppsRepository.kt` (exclude browser).
+
+**VERIFIED on emulator-5554 (API 37), via logs/dumpsys (measured, not guessed):** (1) cold-process `getAppTasks()` after `am kill` returns ALL surviving tabs (`raw=4 tabTaskIds=[...]`) → reconcile drop-half is safe; (2) CloseTabReceiver removes the exact task from `dumpsys recents` (`found=true`); (3) close a tab → HOME → re-foreground Deck → `Reconcile browser tabs against live=[kept]` → the closed tab's card is dropped (probe shows 1 browser card); (4) no phantom browser app-card; (5) idempotent guard holds under repeated restore re-emissions. Installed both on phone (deck-v636) for real-gesture UX confirmation (dismiss-card swipe is the one path only verifiable by hand — send + receive both proven separately). a11y service re-enabled.
+
+**Follow-up (deck-v640) — "focus the last-used card on Home".** User: on Home the carousel sat on the first card instead of following them to whatever they were just in. MEASURED it's PRE-EXISTING (not the tab-sync work): on resume no `_focusEvent` fires, the Activity isn't recreated (`rememberLazyListState` preserves position), so the carousel just keeps its spot. Added `HomeViewModel.focusLastUsed()` (called from `MainActivity.onResume`): resolves the card for `lastUsedPackage` (the a11y-driven last foreground pkg — set even for `com.hermes.browser`, line 112), and for the browser case disambiguates the exact tab via `BrowserTabEventBus.currentFocusedTaskId`, emitting `_focusEvent` to scroll there. **Browser-case timing gotcha:** the tab's `TAB_OPENED`/`TAB_FOCUSED` broadcasts are DEFERRED while Deck is backgrounded, so they land AFTER onResume's first `focusLastUsed` (card/tid not ready → idx=-1). Fixed by also calling `focusLastUsed()` at the END of `reconcileBrowserTabs` (runs on resume after the enumerate round-trip, by when those broadcasts have settled), guarded to `lastUsedPackage == BROWSER_PACKAGE` so the app case never double-scrolls. Emit is safe: out-of-bounds idx just no-ops (never a wrong scroll). VERIFIED on emulator with logs: app case `focusLastUsed pkg=deskclock -> idx=1 -> focusEvent -> 1 (cards=4)`; browser case `pkg=browser tid=171 -> idx=2`. Debug logs removed. deck-v640 on phone, a11y re-enabled.

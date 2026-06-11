@@ -1,11 +1,11 @@
 package com.hermes.deck
 
-import android.app.AppOpsManager
 import android.app.role.RoleManager
 import android.content.Intent
+import android.content.SharedPreferences
+import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
-import android.os.Process
 import android.provider.Settings
 import android.view.KeyEvent
 import android.view.WindowManager
@@ -21,16 +21,37 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
+import androidx.compose.ui.graphics.Color
+import com.hermes.deck.service.AppSwitchEventBus
 import com.hermes.deck.ui.home.HomeScreen
 import com.hermes.deck.ui.home.HomeViewModel
 import com.hermes.deck.ui.onboarding.OnboardingActivity
+import com.hermes.deck.ui.search.providers.ClaudeDeepLink
+import com.hermes.deck.ui.search.providers.ClaudeNotifications
 import com.hermes.deck.ui.theme.DeckTheme
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+
+    companion object {
+        /** True while MainActivity is resumed. Read by ScreenshotAccessibilityService.onKeyEvent. */
+        @Volatile var isInForeground = false
+    }
 
     private lateinit var homeVm: HomeViewModel
     private var isDarkTheme    by mutableStateOf(true)
     private var isDynamicColor by mutableStateOf(true)
+    private var seedColor      by mutableStateOf<Color?>(null)
+
+    private lateinit var appPrefs: SharedPreferences
+    private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
+        when (key) {
+            "material_you" -> { isDynamicColor = prefs.getBoolean(key, true); seedColor = readSeedColor(prefs) }
+            "seed_color"   -> seedColor = readSeedColor(prefs)
+            "theme_mode"   -> { isDarkTheme = resolveIsDark(prefs.getString(key, "system") ?: "system"); applyStatusBarIconColor() }
+        }
+    }
 
     private val requestDefaultLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -38,13 +59,21 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Idempotent: enables on-disk screenshot persistence + preloads any saved shots so restored
+        // cards (esp. browser tabs) aren't blank frames. Also called from the accessibility service,
+        // since there's no Application subclass and either may be the first entry point.
+        com.hermes.deck.data.ScreenshotCache.init(applicationContext)
         homeVm = ViewModelProvider(this, HomeViewModel.factory(this))[HomeViewModel::class.java]
-        val prefs = getSharedPreferences("deck_prefs", MODE_PRIVATE)
-        isDarkTheme    = prefs.getBoolean("dark_mode", true)
-        isDynamicColor = prefs.getBoolean("material_you", true)
-        // Launchers must never exit on back — Compose BackHandlers take priority for UI state
+        appPrefs = getSharedPreferences("deck_prefs", MODE_PRIVATE)
+        isDarkTheme    = resolveIsDark(appPrefs.getString("theme_mode", "system") ?: "system")
+        isDynamicColor = appPrefs.getBoolean("material_you", true)
+        seedColor      = readSeedColor(appPrefs)
+        appPrefs.registerOnSharedPreferenceChangeListener(prefsListener)
+        // Launchers must never exit on back. Compose BackHandlers take priority (registered later,
+        // so higher LIFO priority). This fallback fires only when no Compose handler is enabled,
+        // e.g. if the drawer is open but its BackHandler is disabled due to a state tracking lag.
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() { /* no-op */ }
+            override fun handleOnBackPressed() { homeVm.requestDrawerClose() }
         })
         enableEdgeToEdge()
         window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER)
@@ -53,19 +82,21 @@ class MainActivity : ComponentActivity() {
             window.isNavigationBarContrastEnforced = false
         }
         setContent {
-            DeckTheme(darkTheme = isDarkTheme, dynamicColor = isDynamicColor) {
+            DeckTheme(darkTheme = isDarkTheme, dynamicColor = isDynamicColor, seedColor = seedColor) {
                 HomeScreen(modifier = Modifier.fillMaxSize())
             }
         }
         maybeShowOnboarding()
         maybeRequestDefaultLauncher()
+        handleClaudeDeepLink(intent)   // cold-started from a "Claude replied" notification tap
+        // AppSwitchEventBus is emitted by ScreenshotAccessibilityService (which always consumes
+        // KEYCODE_APP_SWITCH so SystemUI never sees it, even during unlock transitions).
+        lifecycleScope.launch {
+            AppSwitchEventBus.events.collect { homeVm.cycleCard() }
+        }
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        if (keyCode == KeyEvent.KEYCODE_APP_SWITCH) {
-            homeVm.cycleCard()
-            return true
-        }
         if (keyCode == KeyEvent.KEYCODE_DEL) {
             homeVm.backspaceKeyInput()
             return true
@@ -80,20 +111,62 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        isInForeground = true
         val prefs = getSharedPreferences("deck_prefs", MODE_PRIVATE)
-        isDarkTheme    = prefs.getBoolean("dark_mode", true)
+        isDarkTheme    = resolveIsDark(prefs.getString("theme_mode", "system") ?: "system")
         isDynamicColor = prefs.getBoolean("material_you", true)
+        seedColor      = readSeedColor(prefs)
         applyStatusBarIconColor()
         homeVm.refresh()
         homeVm.reloadPinned()
-        homeVm.requestDrawerClose()
+        // Re-sync browser-tab cards with the browser's live tabs so Deck matches native recents
+        // (drops tabs closed/swiped-away there, adds new ones). Self-guards against the init race.
+        homeVm.syncBrowserTabs()
+        // Follow the user: jump the carousel to the card for whatever app/tab they were just in.
+        homeVm.focusLastUsed()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
+        // A tapped "Claude replied" notification reopens that chat instead of closing the drawer.
+        if (handleClaudeDeepLink(intent)) return
         // Fired when the launcher is already in the foreground and receives a new launch
         // intent — e.g. user presses the home button again or uses the system home gesture.
         homeVm.requestDrawerClose()
+    }
+
+    /** If the intent came from a "Claude replied" notification, publish the session id for the
+     *  search surface to reopen and cancel the notification. Returns true if it was consumed. */
+    private fun handleClaudeDeepLink(intent: Intent?): Boolean {
+        val sessionId = intent?.getStringExtra(ClaudeDeepLink.EXTRA_SESSION) ?: return false
+        intent.removeExtra(ClaudeDeepLink.EXTRA_SESSION)   // don't re-fire on rotation / re-resume
+        ClaudeDeepLink.pendingSessionId.value = sessionId
+        ClaudeNotifications.cancel(this, sessionId)
+        return true
+    }
+
+    override fun onPause() {
+        super.onPause()
+        isInForeground = false
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        appPrefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
+    }
+
+    private fun readSeedColor(prefs: android.content.SharedPreferences): Color? {
+        if (isDynamicColor) return null
+        val stored = prefs.getInt("seed_color", 0)
+        return if (stored == 0) null else Color(stored)
+    }
+
+    private fun resolveIsDark(themeMode: String): Boolean = when (themeMode) {
+        "dark"  -> true
+        "light" -> false
+        else    -> (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+                    Configuration.UI_MODE_NIGHT_YES
     }
 
     private fun applyStatusBarIconColor() {
@@ -107,8 +180,8 @@ class MainActivity : ComponentActivity() {
     private fun maybeShowOnboarding() {
         val prefs = getSharedPreferences("deck_prefs", MODE_PRIVATE)
         if (!prefs.getBoolean("onboarding_done", false)) {
-            prefs.edit().putBoolean("onboarding_done", true).apply()
             startActivity(Intent(this, OnboardingActivity::class.java))
+            prefs.edit().putBoolean("onboarding_done", true).apply()
         }
     }
 
@@ -126,21 +199,4 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    fun isAccessibilityEnabled(): Boolean {
-        val enabled = Settings.Secure.getString(
-            contentResolver,
-            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        )
-        return enabled?.contains(packageName) == true
-    }
-
-    fun hasUsageStatsPermission(): Boolean {
-        val appOps = getSystemService(APP_OPS_SERVICE) as AppOpsManager
-        val mode = appOps.checkOpNoThrow(
-            AppOpsManager.OPSTR_GET_USAGE_STATS,
-            Process.myUid(),
-            packageName
-        )
-        return mode == AppOpsManager.MODE_ALLOWED
-    }
 }

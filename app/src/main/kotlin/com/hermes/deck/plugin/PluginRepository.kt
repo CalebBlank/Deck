@@ -42,7 +42,8 @@ class PluginRepository(private val context: Context) {
 
     /** Scans installed packages for providers whose authority starts with AUTHORITY_PREFIX. */
     fun discoverPlugins(): List<PluginInfo> {
-        val packages = context.packageManager.getInstalledPackages(PackageManager.GET_PROVIDERS)
+        val packages = context.packageManager
+            .getInstalledPackages(PackageManager.GET_PROVIDERS or PackageManager.GET_META_DATA)
         return packages
             .flatMap { pkg -> pkg.providers?.toList() ?: emptyList() }
             .filter { provider ->
@@ -71,6 +72,7 @@ class PluginRepository(private val context: Context) {
                         val iSub    = cursor.getColumnIndex(PluginContract.COL_SUBTITLE)
                         val iIcon   = cursor.getColumnIndex(PluginContract.COL_ICON_URI)
                         val iAction = cursor.getColumnIndex(PluginContract.COL_ACTION_URI)
+                        val iType   = cursor.getColumnIndex(PluginContract.COL_RESULT_TYPE)
                         if (iTitle < 0) return@use emptyList<SearchResult.PluginResult>()
                         while (cursor.moveToNext()) {
                             add(SearchResult.PluginResult(
@@ -79,7 +81,8 @@ class PluginRepository(private val context: Context) {
                                 title      = cursor.getString(iTitle) ?: continue,
                                 subtitle   = if (iSub >= 0) cursor.getString(iSub) else null,
                                 iconUri    = if (iIcon >= 0) cursor.getString(iIcon) else null,
-                                actionUri  = if (iAction >= 0) cursor.getString(iAction) else null
+                                actionUri  = if (iAction >= 0) cursor.getString(iAction) else null,
+                                resultType = if (iType >= 0) cursor.getString(iType) else null
                             ))
                         }
                     }

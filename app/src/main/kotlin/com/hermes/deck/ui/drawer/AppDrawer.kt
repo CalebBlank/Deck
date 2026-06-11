@@ -3,18 +3,14 @@ package com.hermes.deck.ui.drawer
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.content.pm.LauncherApps
+import com.hermes.deck.ui.common.rememberAppIconBitmap
 import android.util.Log
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.AnchoredDraggableState
-import androidx.compose.foundation.gestures.DraggableAnchors
-import androidx.compose.foundation.gestures.Orientation
-import androidx.compose.foundation.gestures.anchoredDraggable
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -26,25 +22,30 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
-import androidx.compose.ui.input.nestedscroll.NestedScrollSource
-import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -54,292 +55,135 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import android.appwidget.AppWidgetManager
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import com.hermes.deck.data.AppInfo
 import com.hermes.deck.data.WidgetPinRepository
+import com.hermes.deck.ui.search.TagEditorDialog
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.produceState
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.layout.ContentScale
-import androidx.activity.compose.BackHandler
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.drop
-import kotlinx.coroutines.flow.emptyFlow
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlin.math.roundToInt
 
-private enum class DrawerValue { Closed, Open }
-
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun AppDrawer(
-    onClose: () -> Unit,
     onAppLaunch: (AppInfo) -> Unit,
-    openSignal: SharedFlow<Unit>? = null,
-    closeSignal: SharedFlow<Unit>? = null,
-    dragDeltaFlow: SharedFlow<Float>? = null,
-    settleFlow: SharedFlow<Float>? = null,
-    onOpen: () -> Unit = {},
+    onClose: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val density = LocalDensity.current
-    val drawerScope = rememberCoroutineScope()
     val vm: DrawerViewModel = viewModel(factory = DrawerViewModel.factory(context))
     val apps        by vm.filteredApps.collectAsState()
     val letterIndex by vm.letterIndex.collectAsState()
     val gridColumns by vm.gridColumns.collectAsState()
     val viewMode    by vm.viewMode.collectAsState()
 
-    // Scroll states declared first so LaunchedEffect can reference them safely
     val gridState = rememberLazyGridState()
     val listState = rememberLazyListState()
-    val isSettlingClosed = remember { mutableStateOf(false) }
-    val state = remember {
-        AnchoredDraggableState(
-            initialValue        = DrawerValue.Closed,
-            positionalThreshold = { totalDistance -> totalDistance * 0.3f },
-            velocityThreshold   = { with(density) { 80.dp.toPx() } },
-            animationSpec       = spring(dampingRatio = Spring.DampingRatioNoBouncy)
-        )
-    }
 
-    // Merged signal handler: open, close, and settle all use collectLatest so that
-    // a close signal always cancels any in-progress open settle (and vice versa).
-    // settleFlow is merged here rather than collected separately so stale open-direction
-    // velocities cannot execute after a close signal has already settled the drawer.
-    LaunchedEffect(openSignal, closeSignal, settleFlow) {
-        merge(
-            (openSignal  ?: emptyFlow<Unit>()).map { Float.NEGATIVE_INFINITY },
-            (closeSignal ?: emptyFlow<Unit>()).map { Float.POSITIVE_INFINITY },
-            (settleFlow  ?: emptyFlow<Float>()).map { it }
-        ).collectLatest { velocity ->
-            Log.d("DeckDrawer", "signal velocity=$velocity (close=${velocity == Float.POSITIVE_INFINITY}, open=${velocity == Float.NEGATIVE_INFINITY})")
-            when {
-                velocity == Float.POSITIVE_INFINITY -> {
-                    isSettlingClosed.value = true
-                    state.settle(1_000_000f)
+    Box(
+        modifier = modifier
+            .padding(top = 20.dp)
+    ) {
+        Box(modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(28.dp))) {
+            // Fade the top/bottom edges by DRAWING the gradient inside the list's own draw pass
+            // (drawWithContent) instead of overlaying Boxes — an overlay Box swallows taps on the
+            // icons beneath it, whereas a draw-only fade never participates in hit-testing.
+            val fadeColor = MaterialTheme.colorScheme.surfaceContainerHigh
+            val fadeModifier = Modifier
+                .fillMaxSize()
+                .drawWithContent {
+                    drawContent()
+                    val fadePx = 32.dp.toPx()
+                    drawRect(
+                        brush = Brush.verticalGradient(listOf(fadeColor, Color.Transparent), startY = 0f, endY = fadePx),
+                        size  = Size(size.width, fadePx)
+                    )
+                    drawRect(
+                        brush   = Brush.verticalGradient(
+                            listOf(Color.Transparent, fadeColor),
+                            startY = size.height - fadePx, endY = size.height
+                        ),
+                        topLeft = Offset(0f, size.height - fadePx),
+                        size    = Size(size.width, fadePx)
+                    )
                 }
-                velocity == Float.NEGATIVE_INFINITY -> {
-                    if (state.anchors.hasAnchorFor(DrawerValue.Open) && state.targetValue != DrawerValue.Open) {
-                        state.settle(-1_000_000f)
-                    }
-                }
-                else -> state.settle(velocity)
-            }
-        }
-    }
-
-    // Watch targetValue for both directions:
-    // - Open:   onOpen() fires as soon as settle targets Open (not waiting for completion,
-    //           since collectLatest can cancel settle and currentValue never reaches Open)
-    // - Closed: onClose() fires as soon as settle targets Closed (not waiting for completion
-    //           either, so drawerIsOpen resets even if settle was cancelled mid-open and
-    //           currentValue was already Closed — which would never re-emit)
-    LaunchedEffect(Unit) {
-        snapshotFlow { state.targetValue }
-            .drop(1)
-            .distinctUntilChanged()
-            .collect { target ->
-                Log.d("DeckDrawer", "targetValue → $target")
-                when (target) {
-                    DrawerValue.Open -> {
-                        onOpen()
-                        gridState.scrollToItem(0)
-                        listState.scrollToItem(0)
-                    }
-                    DrawerValue.Closed -> {
-                        isSettlingClosed.value = false
-                        onClose()
-                    }
-                }
-            }
-    }
-
-    // Follow finger during drag from handle
-    LaunchedEffect(dragDeltaFlow) {
-        dragDeltaFlow?.collect { delta -> state.dispatchRawDelta(delta) }
-    }
-
-    // Back button closes the drawer based on actual physics state, not the external drawerIsOpen flag.
-    BackHandler(enabled = state.targetValue == DrawerValue.Open) {
-        drawerScope.launch {
-            isSettlingClosed.value = true
-            state.settle(1_000_000f)
-        }
-    }
-
-    val nestedScrollConnection = remember(state) {
-        object : NestedScrollConnection {
-            override fun onPostScroll(
-                consumed: Offset,
-                available: Offset,
-                source: NestedScrollSource
-            ): Offset {
-                return if (source == NestedScrollSource.Drag && available.y > 0f) {
-                    state.dispatchRawDelta(available.y)
-                    Offset(0f, available.y)
-                } else Offset.Zero
-            }
-
-            // Intercept downward flings before the list consumes them, when the drawer
-            // has already been pulled down. Without this, the list's fling handler eats
-            // the velocity and onPostFling receives ~0, preventing snap-to-close.
-            override suspend fun onPreFling(available: Velocity): Velocity {
-                val offset = runCatching { state.requireOffset() }.getOrNull() ?: return Velocity.Zero
-                return if (offset > 1f && available.y > 50f && !isSettlingClosed.value) {
-                    state.settle(1_000_000f)
-                    available
-                } else Velocity.Zero
-            }
-
-            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
-                val decisive = when {
-                    available.y > 50f  ->  1_000_000f   // flung downward → snap Closed
-                    available.y < -50f -> -1_000_000f   // flung upward   → snap Open
-                    else               ->  available.y  // slow release — let position threshold decide
-                }
-                Log.d("DeckDrawer", "onPostFling: available.y=${available.y}, isSettlingClosed=${isSettlingClosed.value}, decisive=$decisive")
-                if (!isSettlingClosed.value || decisive > 0f) {
-                    state.settle(decisive)
-                }
-                return Velocity.Zero
-            }
-        }
-    }
-
-    val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
-
-    Box(modifier = modifier.fillMaxSize()) {
-        BoxWithConstraints(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 16.dp, end = 16.dp, bottom = 24.dp, top = statusBarTop + 8.dp)
-                .align(Alignment.BottomCenter)
-        ) {
-            val fullHeight = constraints.maxHeight.toFloat()
-            val closedAnchorPx = fullHeight + with(density) { 64.dp.toPx() }
-            val prevClosedAnchor = remember { mutableFloatStateOf(Float.NaN) }
-            SideEffect {
-                if (prevClosedAnchor.floatValue != closedAnchorPx) {
-                    prevClosedAnchor.floatValue = closedAnchorPx
-                    state.updateAnchors(DraggableAnchors {
-                        DrawerValue.Closed at closedAnchorPx
-                        DrawerValue.Open   at 0f
-                    })
-                }
-            }
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .offset { IntOffset(0, if (state.anchors.size > 0) state.requireOffset().roundToInt() else constraints.maxHeight) }
-                    .anchoredDraggable(state, Orientation.Vertical)
-                    .clip(RoundedCornerShape(44.dp))
-                    .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-                    .fillMaxHeight()
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .navigationBarsPadding()
-                        .padding(top = 20.dp)
-                        .nestedScroll(nestedScrollConnection)
+            if (viewMode == DrawerViewMode.List) {
+                LazyColumn(
+                    state          = listState,
+                    contentPadding = PaddingValues(
+                        start  = 16.dp,
+                        end    = 36.dp,
+                        top    = 16.dp,
+                        bottom = 16.dp
+                    ),
+                    modifier = fadeModifier
                 ) {
-                    Box(modifier = Modifier.weight(1f).clip(RoundedCornerShape(28.dp))) {
-                        if (viewMode == DrawerViewMode.List) {
-                            LazyColumn(
-                                state          = listState,
-                                contentPadding = PaddingValues(
-                                    start  = 16.dp,
-                                    end    = 36.dp,
-                                    top    = 16.dp,
-                                    bottom = 16.dp
-                                ),
-                                modifier = Modifier.fillMaxSize()
-                            ) {
-                                items(apps, key = { it.packageName }) { app ->
-                                    AppListItem(
-                                        app     = app,
-                                        onClick = { onAppLaunch(app) },
-                                        onHide  = { vm.hideApp(app.packageName) }
-                                    )
-                                }
-                            }
-                        } else {
-                            LazyVerticalGrid(
-                                state                 = gridState,
-                                columns               = GridCells.Fixed(gridColumns),
-                                contentPadding        = PaddingValues(
-                                    start  = 16.dp,
-                                    end    = 36.dp,
-                                    top    = 16.dp,
-                                    bottom = 16.dp
-                                ),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement   = Arrangement.spacedBy(20.dp),
-                                modifier              = Modifier.fillMaxSize()
-                            ) {
-                                items(apps, key = { it.packageName }) { app ->
-                                    AppGridItem(
-                                        app     = app,
-                                        onClick = { onAppLaunch(app) },
-                                        onHide  = { vm.hideApp(app.packageName) }
-                                    )
-                                }
-                            }
-                        }
-
-                        AlphabetSlider(
-                            letters       = letterIndex.keys.sorted(),
-                            letterIndex   = letterIndex,
-                            scrollToIndex = { idx ->
-                                if (viewMode == DrawerViewMode.List) listState.scrollToItem(idx)
-                                else gridState.scrollToItem(idx)
-                            },
-                            modifier = Modifier
-                                .align(Alignment.CenterEnd)
-                                .padding(end = 8.dp)
-                                .width(20.dp)
-                                .fillMaxHeight()
+                    items(apps, key = { it.packageName }) { app ->
+                        AppListItem(
+                            app     = app,
+                            onClick = { onAppLaunch(app) },
+                            onHide  = { vm.hideApp(app.packageName) }
                         )
-                        val fadeColor = MaterialTheme.colorScheme.surfaceContainerHigh
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.TopCenter)
-                                .fillMaxWidth()
-                                .height(32.dp)
-                                .background(Brush.verticalGradient(listOf(fadeColor, Color.Transparent)))
-                        )
-                        Box(
-                            modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .fillMaxWidth()
-                                .height(32.dp)
-                                .background(Brush.verticalGradient(listOf(Color.Transparent, fadeColor)))
+                    }
+                }
+            } else {
+                LazyVerticalGrid(
+                    state                 = gridState,
+                    columns               = GridCells.Fixed(gridColumns),
+                    contentPadding        = PaddingValues(
+                        start  = 16.dp,
+                        end    = 36.dp,
+                        top    = 16.dp,
+                        bottom = 16.dp
+                    ),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement   = Arrangement.spacedBy(20.dp),
+                    modifier              = fadeModifier
+                ) {
+                    items(apps, key = { it.packageName }) { app ->
+                        AppGridItem(
+                            app     = app,
+                            onClick = { onAppLaunch(app) },
+                            onHide  = { vm.hideApp(app.packageName) }
                         )
                     }
                 }
             }
+
+            AlphabetSlider(
+                letters       = letterIndex.keys.sorted(),
+                letterIndex   = letterIndex,
+                scrollToIndex = { idx ->
+                    if (viewMode == DrawerViewMode.List) listState.scrollToItem(idx)
+                    else gridState.scrollToItem(idx)
+                },
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 8.dp)
+                    .width(20.dp)
+                    .fillMaxHeight()
+            )
+
         }
     }
 }
 
 @Composable
-private fun AlphabetSlider(
+internal fun AlphabetSlider(
     letters: List<Char>,
     letterIndex: Map<Char, Int>,
     scrollToIndex: suspend (Int) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    fullHeightPx: Int = 0
 ) {
     val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
     var activeLetter by remember { mutableStateOf<Char?>(null) }
+    var activeY      by remember { mutableFloatStateOf(0f) }
 
     fun letterAt(yPx: Float, heightPx: Float): Char? {
         if (letters.isEmpty()) return null
@@ -350,56 +194,83 @@ private fun AlphabetSlider(
     fun scrollTo(yPx: Float, heightPx: Float) {
         val ch = letterAt(yPx, heightPx) ?: return
         activeLetter = ch
+        activeY      = yPx
         letterIndex[ch]?.let { itemIdx -> scope.launch { scrollToIndex(itemIdx) } }
     }
 
     Box(
         modifier = modifier.pointerInput(letters, letterIndex) {
-            detectVerticalDragGestures(
-                onDragStart  = { offset -> scrollTo(offset.y, size.height.toFloat()) },
-                onVerticalDrag = { change, _ ->
-                    change.consume()
-                    scrollTo(change.position.y, size.height.toFloat())
-                },
-                onDragEnd    = { activeLetter = null },
-                onDragCancel = { activeLetter = null }
-            )
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                down.consume()
+                scrollTo(down.position.y, size.height.toFloat())
+                var event = awaitPointerEvent()
+                while (event.changes.any { it.pressed }) {
+                    event.changes.forEach { change ->
+                        change.consume()
+                        scrollTo(change.position.y, size.height.toFloat())
+                    }
+                    event = awaitPointerEvent()
+                }
+                activeLetter = null
+            }
         }
     ) {
-        // Bubble indicator floats to the left when dragging
+        val indicatorSize = 72.dp
         activeLetter?.let { ch ->
+            val yOffsetDp = with(density) { activeY.toDp() } - indicatorSize / 2
             Box(
                 modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .offset(x = (-44).dp)
-                    .size(40.dp)
+                    .align(Alignment.TopEnd)
+                    .offset(x = -(indicatorSize + 8.dp), y = yOffsetDp.coerceAtLeast(0.dp))
+                    .requiredSize(indicatorSize)
                     .background(MaterialTheme.colorScheme.primary, CircleShape),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
                     text       = ch.toString(),
                     color      = MaterialTheme.colorScheme.onPrimary,
-                    style      = MaterialTheme.typography.titleMedium,
+                    style      = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold
                 )
             }
         }
 
-        Column(
-            modifier            = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.SpaceEvenly,
-            horizontalAlignment = Alignment.CenterHorizontally
+        val sliderFadeColor = MaterialTheme.colorScheme.surfaceContainerHigh
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxSize()
+                .clipToBounds()
+                .drawWithContent {
+                    drawContent()
+                    val fadePx = 48.dp.toPx()
+                    drawRect(
+                        brush   = Brush.verticalGradient(
+                            listOf(Color.Transparent, sliderFadeColor),
+                            startY = size.height - fadePx, endY = size.height
+                        ),
+                        topLeft = Offset(0f, size.height - fadePx),
+                        size    = Size(size.width, fadePx)
+                    )
+                }
         ) {
-            letters.forEach { ch ->
+            val usedHeight = if (fullHeightPx > 0) fullHeightPx else constraints.maxHeight
+            val itemHeightPx = if (letters.isNotEmpty() && usedHeight > 0) usedHeight / letters.size else 0
+            letters.forEachIndexed { i, ch ->
                 Text(
                     text       = ch.toString(),
                     fontSize   = 9.sp,
+                    lineHeight = 9.sp,
                     textAlign  = TextAlign.Center,
                     color      = if (ch == activeLetter) MaterialTheme.colorScheme.primary
                                  else MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontWeight = if (ch == activeLetter) androidx.compose.ui.text.font.FontWeight.Bold
-                                 else androidx.compose.ui.text.font.FontWeight.Normal,
-                    modifier   = Modifier.fillMaxWidth()
+                    fontWeight = if (ch == activeLetter) FontWeight.Bold
+                                 else FontWeight.Normal,
+                    modifier   = Modifier
+                        .fillMaxWidth()
+                        .offset { IntOffset(0, itemHeightPx * i) }
+                        .height(with(density) { itemHeightPx.toDp() })
+                        .wrapContentHeight(Alignment.CenterVertically)
                 )
             }
         }
@@ -410,17 +281,7 @@ private fun AlphabetSlider(
 @Composable
 private fun AppGridItem(app: AppInfo, onClick: () -> Unit, onHide: () -> Unit = {}) {
     val context = LocalContext.current
-    val iconBitmap by produceState<Bitmap?>(null, app.packageName) {
-        value = withContext(Dispatchers.Default) {
-            val d = app.icon
-            val w = d.intrinsicWidth.coerceIn(1, 192)
-            val h = d.intrinsicHeight.coerceIn(1, 192)
-            Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { bmp ->
-                d.setBounds(0, 0, w, h)
-                d.draw(Canvas(bmp))
-            }
-        }
-    }
+    val iconBitmap = rememberAppIconBitmap(key = app.packageName, drawable = app.icon, size = 192)
 
     val shortcuts by produceState<List<android.content.pm.ShortcutInfo>>(emptyList(), app.packageName) {
         value = withContext(Dispatchers.IO) {
@@ -448,12 +309,14 @@ private fun AppGridItem(app: AppInfo, onClick: () -> Unit, onHide: () -> Unit = 
         }
     }
 
-    var showShortcuts by remember { mutableStateOf(false) }
+    var showShortcuts    by remember { mutableStateOf(false) }
     var showWidgetPicker by remember { mutableStateOf(false) }
+    var showTagEditor    by remember { mutableStateOf(false) }
 
     Box {
         Column(
             modifier            = Modifier
+                .fillMaxWidth()
                 .clip(RoundedCornerShape(12.dp))
                 .combinedClickable(
                     onClick     = onClick,
@@ -475,20 +338,24 @@ private fun AppGridItem(app: AppInfo, onClick: () -> Unit, onHide: () -> Unit = 
                 style    = MaterialTheme.typography.labelMedium,
                 color    = MaterialTheme.colorScheme.onSurface,
                 maxLines = 2,
-                overflow = TextOverflow.Ellipsis
+                minLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
             )
         }
 
-        if (showShortcuts && iconBitmap != null) {
+        if (showShortcuts) {
             ShortcutMenuDialog(
-                app             = app,
-                iconBitmap      = iconBitmap!!,
-                iconCorner      = 12.dp,
-                shortcuts       = shortcuts,
-                widgetProviders = widgetProviders,
-                onDismiss       = { showShortcuts = false },
-                onPickWidget    = { showShortcuts = false; showWidgetPicker = true },
-                onHide          = { showShortcuts = false; onHide() }
+                app          = app,
+                iconBitmap   = iconBitmap,
+                iconCorner   = 12.dp,
+                shortcuts    = shortcuts,
+                hasWidgets   = widgetProviders.isNotEmpty(),
+                onDismiss    = { showShortcuts = false },
+                onPickWidget = { showShortcuts = false; showWidgetPicker = true },
+                onEditTags   = { showShortcuts = false; showTagEditor = true },
+                onHide       = { showShortcuts = false; onHide() }
             )
         }
 
@@ -499,6 +366,13 @@ private fun AppGridItem(app: AppInfo, onClick: () -> Unit, onHide: () -> Unit = 
                 onDismiss       = { showWidgetPicker = false }
             )
         }
+        if (showTagEditor) {
+            TagEditorDialog(
+                packageName = app.packageName,
+                title       = app.label,
+                onDismiss   = { showTagEditor = false }
+            )
+        }
     }
 }
 
@@ -506,17 +380,7 @@ private fun AppGridItem(app: AppInfo, onClick: () -> Unit, onHide: () -> Unit = 
 @Composable
 private fun AppListItem(app: AppInfo, onClick: () -> Unit, onHide: () -> Unit = {}) {
     val context = LocalContext.current
-    val iconBitmap by produceState<Bitmap?>(null, app.packageName) {
-        value = withContext(Dispatchers.Default) {
-            val d = app.icon
-            val w = d.intrinsicWidth.coerceIn(1, 128)
-            val h = d.intrinsicHeight.coerceIn(1, 128)
-            Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { bmp ->
-                d.setBounds(0, 0, w, h)
-                d.draw(Canvas(bmp))
-            }
-        }
-    }
+    val iconBitmap = rememberAppIconBitmap(key = app.packageName, drawable = app.icon, size = 128)
 
     val shortcuts by produceState<List<android.content.pm.ShortcutInfo>>(emptyList(), app.packageName) {
         value = withContext(Dispatchers.IO) {
@@ -544,8 +408,9 @@ private fun AppListItem(app: AppInfo, onClick: () -> Unit, onHide: () -> Unit = 
         }
     }
 
-    var showShortcuts by remember { mutableStateOf(false) }
+    var showShortcuts    by remember { mutableStateOf(false) }
     var showWidgetPicker by remember { mutableStateOf(false) }
+    var showTagEditor    by remember { mutableStateOf(false) }
 
     Box {
         Row(
@@ -577,16 +442,17 @@ private fun AppListItem(app: AppInfo, onClick: () -> Unit, onHide: () -> Unit = 
             )
         }
 
-        if (showShortcuts && iconBitmap != null) {
+        if (showShortcuts) {
             ShortcutMenuDialog(
-                app             = app,
-                iconBitmap      = iconBitmap!!,
-                iconCorner      = 8.dp,
-                shortcuts       = shortcuts,
-                widgetProviders = widgetProviders,
-                onDismiss       = { showShortcuts = false },
-                onPickWidget    = { showShortcuts = false; showWidgetPicker = true },
-                onHide          = { showShortcuts = false; onHide() }
+                app          = app,
+                iconBitmap   = iconBitmap,
+                iconCorner   = 8.dp,
+                shortcuts    = shortcuts,
+                hasWidgets   = widgetProviders.isNotEmpty(),
+                onDismiss    = { showShortcuts = false },
+                onPickWidget = { showShortcuts = false; showWidgetPicker = true },
+                onEditTags   = { showShortcuts = false; showTagEditor = true },
+                onHide       = { showShortcuts = false; onHide() }
             )
         }
 
@@ -597,125 +463,232 @@ private fun AppListItem(app: AppInfo, onClick: () -> Unit, onHide: () -> Unit = 
                 onDismiss       = { showWidgetPicker = false }
             )
         }
+        if (showTagEditor) {
+            TagEditorDialog(
+                packageName = app.packageName,
+                title       = app.label,
+                onDismiss   = { showTagEditor = false }
+            )
+        }
     }
 }
 
 @Composable
 private fun ShortcutMenuDialog(
     app: AppInfo,
-    iconBitmap: Bitmap,
+    iconBitmap: Bitmap?,
     iconCorner: Dp,
     shortcuts: List<android.content.pm.ShortcutInfo>,
-    widgetProviders: List<android.appwidget.AppWidgetProviderInfo>,
+    hasWidgets: Boolean,
     onDismiss: () -> Unit,
     onPickWidget: () -> Unit,
+    onEditTags: () -> Unit,
     onHide: () -> Unit
 ) {
     val context = LocalContext.current
     AlertDialog(
         onDismissRequest = onDismiss,
-        confirmButton    = {},
         shape            = RoundedCornerShape(28.dp),
-        text             = {
-            Column {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier          = Modifier.padding(bottom = 12.dp)
-                ) {
+        title            = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (iconBitmap != null) {
                     Image(
                         bitmap             = iconBitmap.asImageBitmap(),
                         contentDescription = null,
                         modifier           = Modifier.size(48.dp).clip(RoundedCornerShape(iconCorner))
                     )
                     Spacer(Modifier.width(12.dp))
-                    Text(app.label, style = MaterialTheme.typography.titleMedium)
                 }
-                HorizontalDivider()
-                shortcuts.forEach { shortcut ->
-                    val shortcutIcon: Bitmap? = remember(shortcut.id) {
-                        runCatching {
-                            val d = context.getSystemService(LauncherApps::class.java)
-                                .getShortcutIconDrawable(shortcut, 0) ?: return@runCatching null
-                            val w = d.intrinsicWidth.coerceIn(1, 64)
-                            val h = d.intrinsicHeight.coerceIn(1, 64)
-                            Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { bmp ->
-                                d.setBounds(0, 0, w, h)
-                                d.draw(Canvas(bmp))
-                            }
-                        }.getOrNull()
-                    }
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                onDismiss()
-                                runCatching {
-                                    context.getSystemService(LauncherApps::class.java)
-                                        .startShortcut(shortcut, null, null)
-                                }
-                            }
-                            .padding(vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        if (shortcutIcon != null) {
-                            Image(
-                                bitmap             = shortcutIcon.asImageBitmap(),
-                                contentDescription = null,
-                                modifier           = Modifier.size(32.dp)
-                            )
-                            Spacer(Modifier.width(12.dp))
-                        }
-                        Text(
-                            text  = shortcut.shortLabel?.toString() ?: shortcut.id,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                    }
-                }
-                if (shortcuts.isNotEmpty()) HorizontalDivider()
-                if (widgetProviders.isNotEmpty()) {
-                    TextButton(
-                        onClick  = onPickWidget,
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("Select widget", modifier = Modifier.fillMaxWidth()) }
-                }
-                TextButton(
-                    onClick  = onHide,
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("Hide", modifier = Modifier.fillMaxWidth()) }
+                Text(app.label, style = MaterialTheme.typography.titleMedium)
             }
-        }
+        },
+        text             = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                // Actions
+                Row(
+                    modifier          = Modifier.fillMaxWidth().clickable(onClick = onEditTags).padding(vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) { Text("Edit tags", style = MaterialTheme.typography.bodyMedium) }
+                HorizontalDivider()
+                if (hasWidgets) {
+                    Row(
+                        modifier          = Modifier.fillMaxWidth().clickable(onClick = onPickWidget).padding(vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) { Text("Select widget", style = MaterialTheme.typography.bodyMedium) }
+                    HorizontalDivider()
+                }
+                Row(
+                    modifier          = Modifier.fillMaxWidth().clickable(onClick = onHide).padding(vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) { Text("Hide app", style = MaterialTheme.typography.bodyMedium) }
+                HorizontalDivider()
+                Row(
+                    modifier          = Modifier.fillMaxWidth()
+                        .clickable {
+                            onDismiss()
+                            context.startActivity(
+                                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                    data = Uri.fromParts("package", app.packageName, null)
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                            )
+                        }
+                        .padding(vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) { Text("App info", style = MaterialTheme.typography.bodyMedium) }
+
+                // Shortcuts
+                if (shortcuts.isNotEmpty()) {
+                    HorizontalDivider(modifier = Modifier.padding(top = 4.dp))
+                    shortcuts.forEach { shortcut ->
+                        val shortcutIcon: Bitmap? = remember(shortcut.id) {
+                            runCatching {
+                                val d = context.getSystemService(LauncherApps::class.java)
+                                    .getShortcutIconDrawable(shortcut, 0) ?: return@runCatching null
+                                val w = d.intrinsicWidth.coerceIn(1, 64)
+                                val h = d.intrinsicHeight.coerceIn(1, 64)
+                                Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { bmp ->
+                                    d.setBounds(0, 0, w, h)
+                                    d.draw(Canvas(bmp))
+                                }
+                            }.getOrNull()
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onDismiss()
+                                    runCatching {
+                                        context.getSystemService(LauncherApps::class.java)
+                                            .startShortcut(shortcut, null, null)
+                                    }
+                                }
+                                .padding(vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            if (shortcutIcon != null) {
+                                Image(
+                                    bitmap             = shortcutIcon.asImageBitmap(),
+                                    contentDescription = null,
+                                    modifier           = Modifier.size(32.dp)
+                                )
+                                Spacer(Modifier.width(12.dp))
+                            }
+                            Text(
+                                text  = shortcut.shortLabel?.toString() ?: shortcut.id,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton  = {},
+        dismissButton  = null
     )
 }
 
 @Composable
-private fun WidgetPickerDialog(
+internal fun WidgetPickerDialog(
     app: AppInfo,
     widgetProviders: List<android.appwidget.AppWidgetProviderInfo>,
     onDismiss: () -> Unit
 ) {
-    val context = LocalContext.current
-    val pinRepo = remember { WidgetPinRepository(context) }
-    var selected by remember { mutableStateOf(pinRepo.getPinnedWidget(app.packageName)) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title            = { Text("Select widget for ${app.label}") },
-        text             = {
-            LazyColumn {
-                item {
-                    Row(
-                        modifier          = Modifier
-                            .fillMaxWidth()
-                            .clickable { selected = null }
-                            .padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(selected = selected == null, onClick = { selected = null })
-                        Text("None", modifier = Modifier.padding(start = 8.dp))
+    val context  = LocalContext.current
+    val pinRepo  = remember { WidgetPinRepository(context) }
+
+    val initiallyPinned = remember {
+        widgetProviders
+            .map { it.provider.flattenToString() }
+            .filter { pinRepo.isPinnedByComponent(it) }
+            .toSet()
+    }
+    var selected by remember { mutableStateOf(initiallyPinned) }
+
+    // Queue of component names still needing the system bind dialog
+    var bindQueue      by remember { mutableStateOf(emptyList<String>()) }
+    var pendingId      by remember { mutableIntStateOf(-1) }
+    var pendingComp    by remember { mutableStateOf<String?>(null) }
+    var nextBindIntent by remember { mutableStateOf<android.content.Intent?>(null) }
+    var dismissPending by remember { mutableStateOf(false) }
+
+    val widgetHost = remember { android.appwidget.AppWidgetHost(context.applicationContext, 1027).also { it.startListening() } }
+    DisposableEffect(Unit) { onDispose { widgetHost.stopListening() } }
+
+    val bindLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { _ ->
+        val id   = pendingId
+        val comp = pendingComp
+        if (id != -1 && comp != null) {
+            val manager2 = AppWidgetManager.getInstance(context)
+            val bound = manager2.getAppWidgetInfo(id) != null
+            if (bound) {
+                pinRepo.pinWidgetByComponent(comp, id)
+                val info2 = manager2.getAppWidgetInfo(id)
+                if (info2 != null) {
+                    val configComp2 = info2.configure
+                    if (configComp2 != null) {
+                        runCatching {
+                            context.startActivity(
+                                android.content.Intent(AppWidgetManager.ACTION_APPWIDGET_CONFIGURE).apply {
+                                    component = configComp2
+                                    putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, id)
+                                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                            )
+                        }
+                    } else {
+                        context.sendBroadcast(
+                            android.content.Intent(AppWidgetManager.ACTION_APPWIDGET_UPDATE).apply {
+                                setComponent(info2.provider)
+                                putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, intArrayOf(id))
+                            }
+                        )
                     }
                 }
+            } else {
+                runCatching { widgetHost.deleteAppWidgetId(id) }
+            }
+        }
+        pendingId   = -1
+        pendingComp = null
+        val next = bindQueue.firstOrNull()
+        if (next != null) {
+            bindQueue = bindQueue.drop(1)
+            val newId     = widgetHost.allocateAppWidgetId()
+            val component = android.content.ComponentName.unflattenFromString(next)!!
+            pendingId   = newId
+            pendingComp = next
+            nextBindIntent = android.content.Intent(AppWidgetManager.ACTION_APPWIDGET_BIND).apply {
+                putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, newId)
+                putExtra(AppWidgetManager.EXTRA_APPWIDGET_PROVIDER, component)
+            }
+        } else {
+            dismissPending = true
+        }
+    }
+
+    LaunchedEffect(nextBindIntent) {
+        nextBindIntent?.let { intent ->
+            nextBindIntent = null
+            bindLauncher.launch(intent)
+        }
+    }
+
+    LaunchedEffect(dismissPending) {
+        if (dismissPending) onDismiss()
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title            = { Text("Widgets for ${app.label}") },
+        text             = {
+            LazyColumn {
                 items(widgetProviders) { info ->
                     val label = runCatching { info.loadLabel(context.packageManager) }.getOrDefault("Widget")
                     val comp  = info.provider.flattenToString()
+                    val checked = comp in selected
                     val previewBitmap by produceState<ImageBitmap?>(null, info.provider) {
                         value = withContext(Dispatchers.IO) {
                             runCatching {
@@ -735,11 +708,13 @@ private fun WidgetPickerDialog(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { selected = comp }
+                            .clickable { selected = if (checked) selected - comp else selected + comp }
                             .padding(vertical = 4.dp)
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            RadioButton(selected = selected == comp, onClick = { selected = comp })
+                            Checkbox(checked = checked, onCheckedChange = {
+                                selected = if (checked) selected - comp else selected + comp
+                            })
                             Text(label, modifier = Modifier.padding(start = 8.dp))
                         }
                         if (previewBitmap != null) {
@@ -760,9 +735,65 @@ private fun WidgetPickerDialog(
         },
         confirmButton    = {
             TextButton(onClick = {
-                if (selected != null) pinRepo.pinWidget(app.packageName, selected!!)
-                else pinRepo.unpinWidget(app.packageName)
-                onDismiss()
+                val manager = AppWidgetManager.getInstance(context)
+                // Unpin deselected widgets
+                (initiallyPinned - selected).forEach { comp ->
+                    pinRepo.getPinnedWidgetIdByComponent(comp)?.let { runCatching { widgetHost.deleteAppWidgetId(it) } }
+                    pinRepo.unpinWidgetByComponent(comp)
+                }
+                // Bind newly selected widgets — try silent first, queue rest for system dialog
+                val needsDialog = mutableListOf<String>()
+                (selected - initiallyPinned).forEach { comp ->
+                    val newId     = widgetHost.allocateAppWidgetId()
+                    val component = android.content.ComponentName.unflattenFromString(comp)!!
+                    if (manager.bindAppWidgetIdIfAllowed(newId, component)) {
+                        pinRepo.pinWidgetByComponent(comp, newId)
+                        manager.getAppWidgetInfo(newId)?.let { info ->
+                            val configComp = info.configure
+                            if (configComp != null) {
+                                // Widget requires configuration — launch it; the Activity
+                                // is responsible for calling updateAppWidget when done.
+                                runCatching {
+                                    context.startActivity(
+                                        android.content.Intent(AppWidgetManager.ACTION_APPWIDGET_CONFIGURE).apply {
+                                            this.component = configComp
+                                            putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, newId)
+                                            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                    )
+                                }
+                            } else {
+                                // No configure Activity — kick the provider to send initial content.
+                                context.sendBroadcast(
+                                    android.content.Intent(AppWidgetManager.ACTION_APPWIDGET_UPDATE).apply {
+                                        setComponent(info.provider)
+                                        putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, intArrayOf(newId))
+                                    }
+                                )
+                            }
+                        }
+                    } else {
+                        widgetHost.deleteAppWidgetId(newId)
+                        needsDialog += comp
+                    }
+                }
+                if (needsDialog.isEmpty()) {
+                    onDismiss()
+                } else {
+                    val first = needsDialog.first()
+                    val queue = needsDialog.drop(1)
+                    val newId     = widgetHost.allocateAppWidgetId()
+                    val component = android.content.ComponentName.unflattenFromString(first)!!
+                    pendingId   = newId
+                    pendingComp = first
+                    bindQueue   = queue
+                    bindLauncher.launch(
+                        android.content.Intent(AppWidgetManager.ACTION_APPWIDGET_BIND).apply {
+                            putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, newId)
+                            putExtra(AppWidgetManager.EXTRA_APPWIDGET_PROVIDER, component)
+                        }
+                    )
+                }
             }) { Text("Save") }
         },
         dismissButton    = {
